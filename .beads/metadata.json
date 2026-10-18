@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "td_bulk_payments",
+  "project_id": "dc77eda0-efb8-452e-8ff9-355f05f8e1d8"
+}
