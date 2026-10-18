@@ -222,10 +222,3 @@ __marimo__/
 # Firm Payments tooling
 .uv-cache/
 .DS_Store
-
-# Beads / Dolt files (added by bd init)
-.dolt/
-*.db
-.beads-credential-key
-.beads/proxieddb/
-*.gate.lock*
