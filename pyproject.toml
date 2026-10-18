@@ -1,0 +1,41 @@
+[project]
+name = "firm-payments"
+version = "0.1.0"
+description = "Transactional bulk payments between firms"
+requires-python = ">=3.15,<3.16"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "pydantic>=2.10,<3",
+    "psycopg[binary,pool]>=3.2,<4",
+    "uvicorn>=0.34,<1",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28,<1",
+    "mypy>=1.15,<2",
+    "pytest>=8.3,<10",
+    "pytest-bdd>=8,<9",
+    "ruff>=0.11,<1",
+    "testcontainers[postgres]>=4.10,<5",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py315"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.15"
+strict = true
+files = ["firm_payments", "scripts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = ["integration: requires a Docker daemon and real PostgreSQL"]

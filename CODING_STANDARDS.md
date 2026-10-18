@@ -1,0 +1,25 @@
+# Coding standards
+
+Operator accepted architecture and scope in chat: "approve the scope" after the additional idempotency table/header/409/replayed-422 proposal. This resolves design intent only, not installation authority. Small explicit modules and SQL; exact cents, no floating-point money. Atomic payment/balance/idempotency commit; sufficient-funds check after locks; duplicate recipients supported. Payer and payee cannot match. Malformed input, empty batches and unknown firms return 422; successful batches return 201; changed payload for an existing payer/key returns 409. Normalize UUIDs and monetary values before fingerprinting; preserve payment order and descriptions. Do not acquire new resources outside deterministic lock ordering. Public API/schema changes require operator decision.
+
+Use real PostgreSQL via Testcontainers for executable Gherkin/API journeys and SQL/concurrency boundaries. Verify all-or-nothing persistence, exact-balance and insufficient-funds outcomes, concurrent competing spending, repeated recipients, overflow, invalid requests, unknown firms, self-payment rejection, key conflicts, simultaneous retries, replay including 422, and rollback. Selective unit tests for parsing/fingerprinting. Foundation scaffold alone implements no payment behavior and claims no payment verification.
+
+Keep interfaces explicit, changes within approved ownership, and verification tied to requirement/invariant/scenario IDs. Use E2E for journeys, integration checks for boundaries and selective unit/property tests for complex logic. Define observable success, including durable effects and non-functional thresholds where relevant. Run fast deterministic focused checks during edits and comprehensive checks before integration; preserve concise failure evidence. Inspect generated tests for weakened assertions and plausible incorrect implementations that would still pass. Differential checks are useful for migrations.
+
+## Code design and organization
+
+Rule of thumb: make the smallest change that restores the required behavior and passes the required checks. Preserve existing work, approvals, attempt history and safety invariants. Reuse the current path; add abstractions, workflow stages or configuration only when the concrete fix needs them.
+
+Follow approved project requirements/design and stack conventions. These defaults guide choices within that scope; consequential conflicts require explicit HITL. Choose the simplest complete solution to current requirements; add abstractions, dependencies, options or optimizations only for demonstrated needs.
+
+- **Modules:** hide cohesive decisions, representation and invariants behind small useful interfaces. Keep related knowledge together. Extract helpers that remove a meaningful cognitive burden; combine fragments that require reading each other's internals. Avoid pass-through layers and arbitrary size limits.
+- **Readability:** use precise domain names, consistent terminology and explicit units. Keep control flow straightforward, nesting modest and state changes visible. Use types to clarify contracts; comments explain invariants, rationale and non-obvious constraints rather than syntax.
+- **Contracts and failures:** make inputs, outputs, ownership, side effects and errors clear. Prefer valid-by-construction data and owned recovery; preserve validation, meaningful failures, observability and fail-closed approval/security boundaries.
+- **Layout:** start with the language/framework's conventional, smallest useful structure. Keep small projects simple; group growing code by cohesive capability so related changes stay together. Separate business rules from UI, transport and persistence details proportionately; simple functions/modules often suffice. Do not create empty layers or speculative adapters.
+- **Dependencies:** expose small public APIs, keep internals private and architectural dependencies directed. Avoid cycles and importing another module's internals; use existing boundary checks where available.
+- **Ownership:** keep types, validation and configuration with their behavior. Extract shared code for a coherent responsibility with real consumers; avoid catch-all utility/manager dumping grounds. Similar-looking code need not share an abstraction.
+- **Tests and artifacts:** follow the stack's test layout, group tests by capability where useful and keep fixtures near their tests. Separate generated code, build outputs and caches from maintained source.
+
+Before delivery, inspect the changed path for unnecessary concepts, special cases and duplicated decisions. Simplify within approved ownership and verify with task checks. Explain non-obvious tradeoffs in existing change/task notes; no extra report, metrics or refactoring stage. Changes to approved architecture, public contracts, requirements or invariants require explicit HITL before affected implementation.
+
+Basis: [Ousterhout](https://github.com/johnousterhout/aposd-vs-clean-code), [YAGNI](https://martinfowler.com/bliki/Yagni.html) and [Fowler on modular organization](https://martinfowler.com/bliki/PresentationDomainDataLayering.html). Adapted guidance, not quotations.

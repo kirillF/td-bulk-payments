@@ -1,0 +1,7 @@
+# Advisory memories for planning/design. Execution settings come from runtime.json.
+[features]
+memories = true
+
+[memories]
+use_memories = true
+generate_memories = true

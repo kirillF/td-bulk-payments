@@ -1,0 +1,126 @@
+{
+  "scope_id": "greeting",
+  "design_layers": {
+    "product": [
+      "docs/features/greeting/requirements.md",
+      "docs/features/greeting/scenarios.feature"
+    ],
+    "architecture": "docs/features/greeting/architecture.md",
+    "program": [
+      "docs/features/greeting/api.md",
+      "docs/features/greeting/code-design.md"
+    ],
+    "slices": "docs/features/greeting/slices.md"
+  },
+  "artifacts": [
+    {
+      "path": "docs/features/greeting/requirements.md"
+    },
+    {
+      "path": "docs/features/greeting/scenarios.feature"
+    },
+    {
+      "path": "docs/features/greeting/architecture.md"
+    },
+    {
+      "path": "docs/features/greeting/api.md"
+    },
+    {
+      "path": "docs/features/greeting/code-design.md"
+    },
+    {
+      "path": "docs/features/greeting/slices.md"
+    }
+  ],
+  "requirement_ids": [
+    "FR-1"
+  ],
+  "invariant_ids": [
+    "INV-1"
+  ],
+  "scenario_ids": [
+    "SC-1"
+  ],
+  "task_definitions": [
+    {
+      "id": "slice-1",
+      "scope_id": "greeting",
+      "kind": "slice",
+      "title": "Deliver greeting",
+      "outcome": "A working new greeting",
+      "owner": "implementation",
+      "requirements": [
+        "FR-1"
+      ],
+      "nonfunctional": [
+        "Project standards; focused syntax check during edits and journey check before delivery; retain concise assertion failures."
+      ],
+      "invariants": [
+        "INV-1"
+      ],
+      "scenarios": [
+        "SC-1"
+      ],
+      "acceptance": [
+        "Given the name x, calling greet returns exactly new x; returning old x or an empty string must fail the journey check."
+      ],
+      "checks": [
+        "syntax",
+        "journey"
+      ],
+      "ownership": [
+        "app.py"
+      ],
+      "dependencies": [],
+      "context": [
+        "app.py"
+      ],
+      "design": [
+        "docs/features/greeting/api.md",
+        "docs/features/greeting/code-design.md"
+      ],
+      "consequential_open_decisions": []
+    }
+  ],
+  "check_definitions": [
+    {
+      "id": "syntax",
+      "argv": [
+        "python3",
+        "-c",
+        "import app; assert isinstance(app.greet(\"x\"),str)"
+      ],
+      "covers": [
+        "INV-1"
+      ],
+      "timeout_seconds": 30,
+      "baseline": true
+    },
+    {
+      "id": "journey",
+      "argv": [
+        "python3",
+        "-c",
+        "import app; assert app.greet(\"x\") == \"new x\""
+      ],
+      "covers": [
+        "FR-1",
+        "SC-1"
+      ],
+      "timeout_seconds": 30,
+      "baseline": false
+    }
+  ],
+  "environment_definition": {
+    "files": [
+      "CODING_STANDARDS.md"
+    ],
+    "probes": []
+  },
+  "limits": {
+    "worker_timeout_seconds": 1200,
+    "repair_rounds": 3,
+    "infrastructure_retries": 2
+  },
+  "review_context": []
+}
