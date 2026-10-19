@@ -107,12 +107,18 @@ def run_command(
     secrets: tuple[str, ...] = (),
     env: dict[str, str] | None = None,
     max_output: int = 1_048_576,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Bound aggregate output on disk; timeout/overflow can never establish PASS."""
     if not 0 < timeout <= 600 or max_output < 1:
         raise ValueError("Invalid command bounds")
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     started = time.monotonic()
+    # The absolute phase end includes native termination, not a fresh cleanup window.
+    phase_end = deadline if deadline is not None else started + timeout + 7
+    timeout = min(timeout, phase_end - started - 7)
+    if timeout <= 0:
+        raise ValueError("Insufficient aggregate allowance for command cleanup")
     status = "FAIL"
     reason = "nonzero_exit"
     with tempfile.TemporaryFile() as raw:
@@ -143,14 +149,19 @@ def run_command(
             except ProcessLookupError:
                 pass
             try:
-                process.wait(timeout=2)
+                process.wait(timeout=min(2, max(0, phase_end - time.monotonic())))
             except subprocess.TimeoutExpired:
                 pass
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            process.wait(timeout=5)
+            try:
+                process.wait(timeout=min(5, max(0, phase_end - time.monotonic())))
+            except subprocess.TimeoutExpired:
+                status, reason = "FAIL", "process_cleanup_uncertain"
+        if time.monotonic() >= phase_end:
+            status, reason = "FAIL", "aggregate_deadline"
         if os.fstat(raw.fileno()).st_size > max_output:
             status, reason = "FAIL", "output_limit"
         elif status == "PASS" and time.monotonic() - started > timeout:
@@ -211,6 +222,7 @@ def check(group: str) -> Path:
         "qualify-local": [sys.executable, "scripts/qualify_local.py", "exercise"],
         "qualify-local-negative": [sys.executable, "scripts/qualify_local.py", "negative"],
     }
+    deadline: float | None = None
     if group not in commands:
         raise ValueError("Check group is not implemented; no placeholder PASS")
     if group in {
@@ -230,7 +242,11 @@ def check(group: str) -> Path:
         state = json.loads((STATE / "feature-state.json").read_text())
         authority = feature_authority(Path(state["payload"]))
         task = state["current_task"]
-        if state.get("status") in {"LIFECYCLE_IMPLEMENTING", "CRUD_IMPLEMENTING"}:
+        if state.get("status") in {
+            "LIFECYCLE_IMPLEMENTING",
+            "CRUD_IMPLEMENTING",
+            "REVIEW6_REPAIRING",
+        }:
             if state.get("lifecycle_approval_sha256") != LIFECYCLE_AMENDMENT:
                 raise ValueError("Unknown lifecycle authority")
             contract = json.loads((ROOT / "docs/features/bulk-payments/feature.json").read_text())
@@ -263,12 +279,20 @@ def check(group: str) -> Path:
         deadline = (
             crud_deadline(state)
             if state.get("status") == "CRUD_IMPLEMENTING"
+            else review6_repair_deadline(state)
+            if state.get("status") == "REVIEW6_REPAIRING"
             else state["attempts"][task]["deadline_epoch"]
         )
-        if state.get("status") in {"LIFECYCLE_IMPLEMENTING", "CRUD_IMPLEMENTING"}:
+        if state.get("status") in {
+            "LIFECYCLE_IMPLEMENTING",
+            "CRUD_IMPLEMENTING",
+            "REVIEW6_REPAIRING",
+        }:
             deadline = (
                 crud_deadline(state)
                 if state.get("status") == "CRUD_IMPLEMENTING"
+                else review6_repair_deadline(state)
+                if state.get("status") == "REVIEW6_REPAIRING"
                 else lifecycle_deadline(state, task)
             )
         if state.get("status") == "VERSIONED_IMPLEMENTING":
@@ -308,6 +332,26 @@ def check(group: str) -> Path:
             deadline = repair["deadline_epoch"]
         if time.time() >= deadline:
             raise ValueError("Slice attempt deadline exhausted")
+    aggregate_end = (
+        time.monotonic() + max(0, deadline - time.time()) if deadline is not None else None
+    )
+    handoff_reserve = 30
+    resource_cleanup = group in {
+        "container-boot",
+        "container-http",
+        "observability",
+        "atomic-api",
+        "contention",
+        "idempotency",
+        "resource-failures",
+    }
+    # Resource cleanup has 30s work plus 7s native termination; handoff is protected.
+    command_end = (
+        aggregate_end - handoff_reserve - (37 if resource_cleanup else 0)
+        if aggregate_end is not None
+        else None
+    )
+    cleanup_end = aggregate_end - handoff_reserve if aggregate_end is not None else None
     before = manifest()
     environment_before = environment()
     run = STATE / "checks" / uuid.uuid4().hex
@@ -317,6 +361,7 @@ def check(group: str) -> Path:
         run,
         env=child_environment,
         timeout=30 if group == "baseline-syntax" else 300,
+        deadline=command_end,
     )
     if group in {"qualify-local", "qualify-local-negative"}:
         for journal in run.rglob("ownership.json"):
@@ -324,6 +369,7 @@ def check(group: str) -> Path:
                 [sys.executable, "scripts/qualify_local.py", "cleanup", str(journal.parent)],
                 run / ("cleanup-" + journal.parent.name),
                 timeout=30,
+                deadline=cleanup_end,
             )
             if cleanup_result["status"] != "PASS":
                 result.update(status="FAIL", reason="cleanup_uncertain")
@@ -340,6 +386,7 @@ def check(group: str) -> Path:
             [sys.executable, "scripts/harness_checks.py", "cleanup", str(run)],
             run / "cleanup",
             timeout=30,
+            deadline=cleanup_end,
         )
         if cleanup_result["status"] != "PASS":
             result.update(status="FAIL", reason="cleanup_uncertain")
@@ -348,6 +395,13 @@ def check(group: str) -> Path:
         result.update(status="FAIL", reason="environment_drift")
     if before != after:
         result.update(status="FAIL", reason="candidate_drift")
+    completed_epoch = time.time()
+    if aggregate_end is not None and (
+        time.monotonic() >= aggregate_end - handoff_reserve
+        or (deadline is not None and completed_epoch >= deadline - handoff_reserve)
+    ):
+        result.update(status="FAIL", reason="aggregate_deadline")
+    result.update(aggregate_deadline_epoch=deadline, check_completed_epoch=completed_epoch)
     save(
         run / "evidence.json",
         {
@@ -364,6 +418,12 @@ def check(group: str) -> Path:
             "policy_sha256": POLICY,
         },
     )
+    # Evidence serialization itself cannot turn an expired check into accepted PASS.
+    if deadline is not None and time.time() >= deadline:
+        result.update(status="FAIL", reason="aggregate_deadline")
+        saved = json.loads((run / "evidence.json").read_text())
+        saved.update(status="FAIL", reason="aggregate_deadline")
+        save(run / "evidence.json", saved)
     print(f"{group}: {result['status']}; evidence {run / 'evidence.json'}")
     if result["status"] != "PASS":
         raise RuntimeError("Project-local check failed; evidence retained")
@@ -382,6 +442,10 @@ def current_evidence(path: Path, group: str) -> dict[str, Any]:
         or digest(Path(value["log"]).read_bytes()) != value.get("log_sha256")
     ):
         raise ValueError("Missing, failed, stale or altered project-local evidence")
+    if value.get("aggregate_deadline_epoch") is not None and (
+        value.get("check_completed_epoch", float("inf")) >= value["aggregate_deadline_epoch"]
+    ):
+        raise ValueError("Check completed after aggregate deadline")
     for artifact, expected in value.get("artifacts", {}).items():
         if digest(Path(artifact).read_bytes()) != expected:
             raise ValueError("Altered check runtime artifact")
@@ -780,6 +844,59 @@ def crud_deadline(state: dict[str, Any]) -> float:
     return float(attempt["deadline_epoch"])
 
 
+REVIEW6_REPAIR = "dd2346bcd4c318fccd6542ac0f7e8ecef6343cbae350256a47758c92deb2b29b"
+
+
+def review6_repair_authority() -> dict[str, Any]:
+    value = approval(
+        STORE / f"{REVIEW6_REPAIR}.payload.json",
+        {
+            "purpose": "project-local-review6-finding-bound-repair-v1",
+            "project": str(ROOT),
+            "scope_id": "bulk-payments",
+        },
+    )
+    for name, expected in value["artifacts"].items():
+        path = Path(name)
+        if path.is_symlink() or ROOT not in path.resolve().parents:
+            raise ValueError("Repair artifact escapes project")
+        if digest(path.read_bytes()) != expected:
+            raise ValueError("Approved repair artifact changed")
+    return value
+
+
+def review6_repair_deadline(state: dict[str, Any]) -> float:
+    review6_repair_authority()
+    attempt = state["review6_repair_attempt"]
+    if attempt["approval_sha256"] != REVIEW6_REPAIR or state["repair_rounds_used"] != 5:
+        raise ValueError("Unknown finding-bound repair authority")
+    if attempt["deadline_epoch"] != attempt["started_epoch"] + 1200:
+        raise ValueError("Repair aggregate allowance changed")
+    return float(attempt["deadline_epoch"])
+
+
+def review6_design_overrides(prior: dict[str, str]) -> dict[str, str]:
+    directory = STATE / "review6-repair-amendment"
+    if not (directory / "contract-alignment.json").exists():
+        return prior
+    review6_repair_authority()
+    alignment = json.loads((directory / "contract-alignment.json").read_text())
+    if alignment["approval_sha256"] != REVIEW6_REPAIR:
+        raise ValueError("Unknown review6 alignment authority")
+    changes = alignment["changes"]
+    if set(changes) != {name for name in prior if name.startswith("docs/features/")}:
+        raise ValueError("Unexpected review6 contract paths")
+    result = dict(prior)
+    for name, change in changes.items():
+        snapshot = directory / "aligned-contracts" / Path(name).name
+        if change["preimage_sha256"] != prior[name]:
+            raise ValueError("Repair contract preimage mismatch")
+        if snapshot.is_symlink() or digest(snapshot.read_bytes()) != change["postimage_sha256"]:
+            raise ValueError("Repair contract snapshot changed")
+        result[name] = change["postimage_sha256"]
+    return result
+
+
 def feature_authority(payload: Path) -> dict[str, Any]:
     policy()
     value = approval(
@@ -798,6 +915,7 @@ def feature_authority(payload: Path) -> dict[str, Any]:
     overrides = lifecycle_design_overrides(value, overrides)
     overrides = single_pool_design_overrides(overrides)
     overrides = crud_design_overrides(overrides)
+    overrides = review6_design_overrides(overrides)
     for name, original in value["artifacts"].items():
         expected = overrides.get(name, original)
         path = ROOT / name

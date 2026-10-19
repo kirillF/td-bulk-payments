@@ -276,7 +276,7 @@ def main() -> None:
                 "tests/test_migrations.py",
                 "tests/test_payments.py",
                 "tests/test_journeys.py",
-                "--scenarios=SC-1,SC-2,SC-3,SC-4,SC-5,SC-6,SC-14,SC-17,SC-19,SC-21,SC-27,SC-28,SC-30,SC-32,SC-33,SC-35",
+                "--scenarios=SC-1,SC-2,SC-3,SC-4,SC-5,SC-6,SC-14,SC-17,SC-19,SC-21,SC-27,SC-28,SC-30,SC-32,SC-33,SC-35,SC-59",
                 "-k",
                 selection,
             ],

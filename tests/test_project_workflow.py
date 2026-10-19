@@ -303,3 +303,99 @@ def test_application_persistence_boundaries():
                             )
                         ), str(path)
     assert not (root / "app/db/idempotency.py").exists()
+
+
+@pytest.mark.parametrize("phase", ["normal", "command", "cleanup"])
+def test_command_deadline_includes_native_cleanup(tmp_path, monkeypatch, phase):
+    clock = [0.0]
+    waits = []
+
+    class Process:
+        pid = 123456
+        returncode = 0
+
+        def poll(self):
+            if phase == "command":
+                clock[0] = 21.0
+            return 0
+
+        def wait(self, timeout):
+            waits.append(timeout)
+            if phase == "cleanup":
+                clock[0] = 21.0
+            return 0
+
+    monkeypatch.setattr(workflow.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(workflow.subprocess, "Popen", lambda *a, **kw: Process())
+    monkeypatch.setattr(workflow.os, "killpg", lambda *a: None)
+    result = workflow.run_command(["test-only"], tmp_path, timeout=300, deadline=20)
+    assert result["timeout_seconds"] == 13
+    assert all(0 <= value <= 5 for value in waits)
+    assert result["status"] == ("PASS" if phase == "normal" else "FAIL")
+    if phase != "normal":
+        assert result["reason"] == "aggregate_deadline"
+
+
+def test_one_second_cannot_launch_without_cleanup_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(workflow.time, "monotonic", lambda: 10)
+    monkeypatch.setattr(
+        workflow.subprocess, "Popen", lambda *a, **kw: pytest.fail("must not launch")
+    )
+    with pytest.raises(ValueError, match="allowance for command cleanup"):
+        workflow.run_command(["test-only"], tmp_path, timeout=300, deadline=11)
+
+
+@pytest.mark.parametrize("expiry", ["command", "cleanup", "environment", "serialization"])
+def test_check_cannot_record_pass_after_aggregate_expiry(tmp_path, monkeypatch, expiry):
+    wall = [100.0]
+    mono = [1000.0]
+    calls = []
+    environment_calls = []
+    state = {
+        "status": "TEST_ONLY",
+        "payload": str(tmp_path / "not-an-approval"),
+        "current_task": "test-only",
+        "attempts": {"test-only": {"deadline_epoch": 200}},
+    }
+    (tmp_path / "feature-state.json").write_text(json.dumps(state))
+    monkeypatch.setattr(workflow, "STATE", tmp_path)
+    monkeypatch.setattr(
+        workflow,
+        "feature_authority",
+        lambda *_: {"tasks": {"test-only": {"checks": ["atomic-api"]}}},
+    )
+    monkeypatch.setattr(workflow, "manifest", lambda: {"source.py": "unchanged"})
+    monkeypatch.setattr(workflow.time, "time", lambda: wall[0])
+    monkeypatch.setattr(workflow.time, "monotonic", lambda: mono[0])
+
+    def environment():
+        environment_calls.append(1)
+        if expiry == "environment" and len(environment_calls) == 2:
+            wall[0], mono[0] = 201, 1101
+        return {}
+
+    def run(argv, directory, **kwargs):
+        calls.append(kwargs)
+        directory.mkdir(parents=True)
+        log = directory / "command.log"
+        log.write_bytes(b"synthetic test-only success")
+        if (expiry == "command" and len(calls) == 1) or (expiry == "cleanup" and len(calls) == 2):
+            wall[0], mono[0] = 201, 1101
+        return {"status": "PASS", "log": str(log), "log_sha256": workflow.digest(log.read_bytes())}
+
+    save = workflow.save
+
+    def save_with_clock(path, value):
+        save(path, value)
+        if expiry == "serialization" and path.name == "evidence.json":
+            wall[0], mono[0] = 201, 1101
+
+    monkeypatch.setattr(workflow, "environment", environment)
+    monkeypatch.setattr(workflow, "run_command", run)
+    monkeypatch.setattr(workflow, "save", save_with_clock)
+    with pytest.raises(RuntimeError, match="check failed"):
+        workflow.check("atomic-api")
+    assert calls[0]["deadline"] == 1033  # Native cleanup, resource cleanup and handoff reserved.
+    assert calls[1]["deadline"] == 1070  # Same absolute allowance, no fresh cleanup window.
+    record = json.loads(next((tmp_path / "checks").glob("*/evidence.json")).read_text())
+    assert record["status"] == "FAIL" and record["reason"] == "aggregate_deadline"

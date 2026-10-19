@@ -56,13 +56,15 @@ def prepare_request(body: bytes, keys: list[str]) -> tuple[BulkPayment, str]:
             ]
         ) from None
     try:
-        request = BulkPayment.model_validate(json.loads(body))
+        decoded = json.loads(body)
+    except ValueError, UnicodeDecodeError, RecursionError:
+        raise RequestValidationError(
+            [{"loc": ("body",), "msg": "Invalid JSON", "type": "json_invalid"}]
+        ) from None
+    try:
+        request = BulkPayment.model_validate(decoded)
     except ValidationError as error:
         raise RequestValidationError(
             [{**item, "loc": ("body", *item["loc"])} for item in error.errors()]
-        ) from None
-    except json.JSONDecodeError, UnicodeDecodeError:
-        raise RequestValidationError(
-            [{"loc": ("body",), "msg": "Invalid JSON", "type": "json_invalid"}]
         ) from None
     return request, header.keys[0]

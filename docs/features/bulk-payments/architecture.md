@@ -151,7 +151,7 @@ No throughput claim, external collector, authentication or production ingress po
 
 ## Verification and gates
 
-SC-1–54 and every outline row must be bound, including changed processing/retry semantics.
+SC-1–59 and every outline row must be bound, including changed processing/retry semantics.
 Exercise independent pools, actual PostgreSQL coordination, expired-generation races,
 old-owner resumption, migration preservation and faults before/after every A/B commit.
 Verify safe fallback headers, context isolation, INFO/DEBUG filtering, redaction, settings
@@ -177,3 +177,9 @@ validates the durable receipt, then conditionally publishes or deletes under tha
 failures roll back only a database-owned savepoint. Busy/active owners remain processing;
 recovery never executes payments. Controllers call fencing, payments and receipt recording
 independently in business transaction B, between admission A and publication A.
+
+## Decoder failure boundary
+
+Decode raw JSON separately from model validation. Decoder failures return safe422 before
+admission; model validation retains its schema errors. Neither path exposes raw input.
+Oversized integer conversion is covered alongside the existing safe nesting rejection.

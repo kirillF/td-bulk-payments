@@ -590,3 +590,15 @@ Feature: Atomic and idempotent bulk settlement between firms
     When the service starts against the supported revision
     Then startup checks revision without reconstructing application schema catalogs
     And migration-created constraints reject invalid balances and duplicate firm UUIDs
+
+
+  @SC-59
+  Scenario Outline: Raw JSON decoder boundaries reject safely before admission
+    Given a raw decoder boundary payload "<kind>"
+    When the raw decoder boundary request is submitted
+    Then safe 422 diagnostic metadata is returned without money or admission changes
+
+    Examples:
+      | kind                     |
+      | integer conversion limit |
+      | excessive nesting        |

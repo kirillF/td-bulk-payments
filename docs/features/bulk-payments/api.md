@@ -1,6 +1,6 @@
 # Firm Payments — API contract
 
-Implements [FR-1–19 and NFR-1–12](requirements.md) and [SC-1–57](scenarios.feature) under the accepted
+Implements [FR-1–19 and NFR-1–12](requirements.md) and [SC-1–59](scenarios.feature) under the accepted
 [architecture](architecture.md). This is the proposed program contract, not a claim of
 implementation completion.
 

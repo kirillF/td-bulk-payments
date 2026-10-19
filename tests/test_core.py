@@ -245,3 +245,43 @@ def test_bootstrap_loads_dotenv_without_environment_database_url(seeded_database
     assert (
         count(seeded_database, "payments") == count(seeded_database, "bulk_payment_requests") == 0
     )
+
+
+def raw_decoder_response(application, kind):
+    if kind == "integer conversion limit":
+        raw = json.dumps(payload("RAW_INTEGER")).replace('"RAW_INTEGER"', "9" * 5000).encode()
+    elif kind == "excessive nesting":
+        raw = b"[" * 1100 + b"0" + b"]" * 1100
+    else:
+        raise AssertionError(kind)
+    return application.state.test_client.post(
+        "/v1/bulk-payments",
+        content=raw,
+        headers={
+            "Content-Type": "application/json",
+            "Idempotency-Key": "decoder-boundary",
+            "X-Correlation-ID": "parser.boundary",
+        },
+    )
+
+
+def assert_decoder_rejected(response, database_url, before):
+    assert response.status_code == 422
+    assert response.headers["X-Correlation-ID"] == "parser.boundary"
+    assert response.headers["X-Request-ID"]
+    assert all(set(item) == {"loc", "msg", "type"} for item in response.json()["detail"])
+    assert "99999999999999999999" not in response.text
+    assert balances(database_url) == before
+    for table in [
+        "payments",
+        "bulk_payment_requests",
+        "request_execution_guards",
+        "request_result_receipts",
+    ]:
+        assert count(database_url, table) == 0
+
+
+@pytest.mark.parametrize("kind", ["integer conversion limit", "excessive nesting"])
+def test_raw_decoder_errors_are_safe_before_admission(application, seeded_database, kind):
+    before = balances(seeded_database)
+    assert_decoder_rejected(raw_decoder_response(application, kind), seeded_database, before)

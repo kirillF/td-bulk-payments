@@ -89,6 +89,10 @@ def change_balances(ctx, values):
 
 @given(parsers.re(r"(?P<step>.+)"))
 def arrange(step, ctx, docstring=None):
+    if step.startswith('a raw decoder boundary payload "'):
+        ctx.decoder_kind = step.split('"')[1]
+        ctx.decoder_balances = balances(ctx.db)
+        return
     from .test_idempotency import recovery_step
 
     if recovery_step(ctx, step, "given"):
@@ -291,6 +295,11 @@ def arrange(step, ctx, docstring=None):
 
 @when(parsers.re(r"(?P<step>.+)"))
 def act(step, ctx, docstring=None):
+    if step == "the raw decoder boundary request is submitted":
+        from .test_core import raw_decoder_response
+
+        ctx.decoder_response = raw_decoder_response(ctx.app, ctx.decoder_kind)
+        return
     from .test_idempotency import recovery_step
 
     if recovery_step(ctx, step, "when"):
@@ -575,6 +584,11 @@ def act(step, ctx, docstring=None):
 
 @then(parsers.re(r"(?P<step>.+)"))
 def verify(step, ctx, datatable=None):
+    if step == "safe 422 diagnostic metadata is returned without money or admission changes":
+        from .test_core import assert_decoder_rejected
+
+        assert_decoder_rejected(ctx.decoder_response, ctx.db, ctx.decoder_balances)
+        return
     from .test_idempotency import recovery_step
 
     if recovery_step(ctx, step, "then"):

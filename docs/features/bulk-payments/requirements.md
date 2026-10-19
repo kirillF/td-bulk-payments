@@ -182,7 +182,7 @@ Additional scenario mapping:
 The current source implements the earlier Alembic contract; earlier PASS evidence remains
 bound to that earlier candidate. This target changes FR-5–8 and INV-4, adds FR-15–19,
 NFR-9–12 and INV-8, updates affected prior scenarios and adds SC-39–58. It contains
-58 scenarios / 98 expanded cases. No new behavior or check is delivered by this draft.
+59 scenarios / 100 expanded cases. No new behavior or check is delivered by this draft.
 
 Schema authority: Alembic migrations define tables, constraints and indexes; PostgreSQL
 enforces data integrity. Startup verifies connectivity and supported revision without
@@ -190,3 +190,5 @@ reconstructing application schema catalogs. Manual drift with an unchanged revis
 outside this startup guarantee. Verified legacy adoption remains migration-only.
 Lifecycle, business and publication use independent successive transactions from one
 bounded pool, with physical session reuse permitted and pool_max=1 supported.
+
+| SC-59 | Existing FR-1, FR-15, FR-17; INV-6: raw decoder boundary failures return safe422 with diagnostic metadata before admission or financial changes. Payload dimensions are test-profile values, not product limits. |

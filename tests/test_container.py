@@ -220,3 +220,79 @@ def test_final_http_samples():
                 assert connection.execute("SELECT count(*) FROM payments").fetchone() == (
                     len(body["payments"]),
                 )
+            assert_container_http_lifecycle(url, endpoint)
+
+
+def assert_container_http_lifecycle(database_url, endpoint):
+    """Prove real packaged HTTP metadata/replay/TTL without changing sample oracles."""
+    from datetime import timedelta
+
+    import httpx
+
+    from .conftest import PAYEE, PAYER, balances, payload
+
+    before = balances(database_url)
+    with psycopg.connect(database_url) as connection:
+        count_before = connection.execute("SELECT count(*) FROM payments").fetchone()[0]
+
+    def send(correlation):
+        response = httpx.post(
+            endpoint,
+            json=payload("1"),
+            headers={"Idempotency-Key": "http-ttl", "X-Correlation-ID": correlation},
+            timeout=10,
+        )
+        assert response.status_code == 201
+        assert response.headers.get_list("X-Correlation-ID") == [correlation]
+        assert len(response.headers.get_list("X-Request-ID")) == 1
+        assert response.headers["X-Request-ID"]
+        return response
+
+    def generation():
+        with psycopg.connect(database_url) as connection:
+            row = connection.execute(
+                "SELECT generation,expires_at,completed_at FROM bulk_payment_requests "
+                "WHERE payer_firm_uuid=%s AND idempotency_key='http-ttl'",
+                (PAYER,),
+            ).fetchone()
+        assert row and row[1] - row[2] == timedelta(hours=24)
+        return row
+
+    initial = send("linux.initial")
+    original = generation()
+    replay = send("linux.replay")
+    assert replay.json() == initial.json() and generation() == original
+    after_one = dict(before)
+    after_one[PAYER] -= 100
+    after_one[PAYEE] += 100
+    assert balances(database_url) == after_one
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT count(*) FROM payments").fetchone()[0] == count_before + 1
+        assert (
+            connection.execute(
+                "UPDATE bulk_payment_requests SET expires_at=clock_timestamp()-interval '1 second' "
+                "WHERE generation=%s AND state='completed'",
+                (original[0],),
+            ).rowcount
+            == 1
+        )
+    replacement = send("linux.expired")
+    new = generation()
+    assert new[0] != original[0]
+    assert replacement.json()["payments"][0]["id"] != initial.json()["payments"][0]["id"]
+    replay_new = send("linux.replay-new")
+    assert replay_new.json() == replacement.json() and generation() == new
+    assert len({r.headers["X-Request-ID"] for r in [initial, replay, replacement, replay_new]}) == 4
+    after_two = dict(before)
+    after_two[PAYER] -= 200
+    after_two[PAYEE] += 200
+    assert balances(database_url) == after_two
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT count(*) FROM payments").fetchone()[0] == count_before + 2
+        for table in ["request_execution_guards", "request_result_receipts"]:
+            assert connection.execute(
+                f"SELECT count(*) FROM {table} WHERE generation=%s", (original[0],)
+            ).fetchone() == (0,)
+            assert connection.execute(
+                f"SELECT count(*) FROM {table} WHERE generation=%s", (new[0],)
+            ).fetchone() == (1,)
