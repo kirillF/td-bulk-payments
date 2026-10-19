@@ -1,7 +1,10 @@
 """Initial supported application schema and verified baseline."""
 
+import psycopg
 from alembic import op
 from alembic.util import CommandError
+
+from app.db.database import validate_schema_sync
 
 revision = "0001_initial"
 down_revision = None
@@ -49,8 +52,11 @@ def upgrade() -> None:
         "SELECT to_regclass('firms'), to_regclass('payments'), to_regclass('bulk_payment_requests')"
     ).one()
     if any(present):
-        # This first slice rejects legacy data until verified adoption is delivered.
-        raise CommandError("Unversioned application schema requires verified adoption")
+        driver = connection.connection.driver_connection
+        if not isinstance(driver, psycopg.Connection):
+            raise CommandError("Unsupported migration connection")
+        validate_schema_sync(driver)
+        return
     connection.exec_driver_sql(INITIAL_SCHEMA)
 
 

@@ -112,3 +112,8 @@ Schema changes use Alembic revisions. Run `uv run --locked alembic upgrade head`
 includes `alembic.ini` and `migrations/`; its one-shot Compose migration finishes
 before the HTTP service starts. Application SQL remains psycopg with no ORM.
 Initial downgrade is intentionally unsupported because it would remove financial data.
+
+A compatible database created by the former bootstrap can be adopted without changing
+its financial records or sequence state. Partial or incompatible application schemas
+are rejected; do not bypass this with an unconditional `alembic stamp`. Concurrent
+upgrades serialize before version inspection and fail on the finite migration lock bound.

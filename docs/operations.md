@@ -76,3 +76,9 @@ use the same runtime configuration and transaction policy. Connection establishm
 lock waits and statements are bounded; an advisory transaction lock precedes version
 inspection. Migration errors are sanitized. Do not stamp an unknown database or run
 a destructive initial downgrade; retain data and investigate incompatibility.
+
+Legacy adoption verifies the complete supported schema through the same structural
+oracle as async service startup. Columns, identities, validated constraints, UUID
+index/collation and timestamp defaults must match. A failed head-recording transaction
+preserves legacy rows and leaves no new version state. Investigate mismatches rather
+than changing or stamping a financial database automatically.
