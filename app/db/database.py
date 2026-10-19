@@ -171,7 +171,7 @@ async def run_owned[T](
     except BaseException as original_error:
 
         @instrument("database.cleanup")
-        async def cleanup() -> BaseException | None:
+        async def cleanup(work_error: BaseException = original_error) -> BaseException | None:
             try:
                 # close_returns is false: disposal does not perform rollback I/O.
                 if not owner.returning:
@@ -187,7 +187,7 @@ async def run_owned[T](
             except BaseException as cleanup_error:
                 # Joining a failed task can re-raise the original work error; that is
                 # not a second failure during cleanup.
-                return None if cleanup_error is original_error else cleanup_error
+                return None if cleanup_error is work_error else cleanup_error
             return None
 
         cleanup_task = asyncio.create_task(cleanup(), name="payment-db-cleanup")
