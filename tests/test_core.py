@@ -272,13 +272,13 @@ def assert_decoder_rejected(response, database_url, before):
     assert all(set(item) == {"loc", "msg", "type"} for item in response.json()["detail"])
     assert "99999999999999999999" not in response.text
     assert balances(database_url) == before
-    for table in [
-        "payments",
-        "bulk_payment_requests",
-        "request_execution_guards",
-        "request_result_receipts",
-    ]:
+    for table in ["payments", "bulk_payment_requests"]:
         assert count(database_url, table) == 0
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute(
+            "SELECT (SELECT count(*) FROM request_execution_guards), "
+            "(SELECT count(*) FROM request_result_receipts)"
+        ).fetchone() == (0, 0)
 
 
 @pytest.mark.parametrize("kind", ["integer conversion limit", "excessive nesting"])
