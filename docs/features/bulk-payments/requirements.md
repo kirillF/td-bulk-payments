@@ -42,7 +42,7 @@ product requirements.
 | FR-10 | Apply tracked, ordered Alembic revisions to create an empty application database and record the applied revision. Schema changes run explicitly before service startup, never within payment requests. |
 | FR-11 | Adopt a database created by the former bootstrap only after verifying its complete supported schema. Preserve firms, balances, payments, generated identities and durable idempotency results. Reject incompatible or partial legacy schemas without falsely recording migration success. |
 | FR-12 | Repeated and concurrent upgrade requests must produce one consistent supported schema/revision state without duplicate DDL or data loss. If an upgrade fails, its schema and revision changes roll back together and a later retry can safely proceed. |
-| FR-13 | Service startup requires both a compatible application schema and the revision supported by that service version. A missing, older or unknown revision prevents startup; a healthy database connection alone cannot waive this check. |
+| FR-13 | Service startup requires connectivity and the Alembic revision supported by that service version. A missing, older or unknown revision prevents startup; a healthy database connection alone cannot waive this check. |
 | FR-14 | Initial migration adoption does not authorize destructive schema repair, data reset or downgrade. Unsupported destructive downgrade requests fail without changing application data or the recorded revision. |
 
 ## Correlation, logging, configuration and request lifecycle
@@ -175,9 +175,18 @@ Additional scenario mapping:
 | SC-55 | FR-10–13, FR-19; INV-7–8; migrate old completed records without immediate expiry/data loss. |
 | SC-56–57 | NFR-3, NFR-11; FR-8, FR-18–19; INV-8; bounded maintenance and sequential A/B resource ownership. |
 
+| SC-58 | FR-11, FR-13; NFR-3; revision-only startup and migration-owned integrity. |
+
 ## Requirement-driven verification status
 
 The current source implements the earlier Alembic contract; earlier PASS evidence remains
 bound to that earlier candidate. This target changes FR-5–8 and INV-4, adds FR-15–19,
-NFR-9–12 and INV-8, updates affected prior scenarios and adds SC-39–57. It contains
-57 scenarios / 97 expanded cases. No new behavior or check is delivered by this draft.
+NFR-9–12 and INV-8, updates affected prior scenarios and adds SC-39–58. It contains
+58 scenarios / 98 expanded cases. No new behavior or check is delivered by this draft.
+
+Schema authority: Alembic migrations define tables, constraints and indexes; PostgreSQL
+enforces data integrity. Startup verifies connectivity and supported revision without
+reconstructing application schema catalogs. Manual drift with an unchanged revision is
+outside this startup guarantee. Verified legacy adoption remains migration-only.
+Lifecycle, business and publication use independent successive transactions from one
+bounded pool, with physical session reuse permitted and pool_max=1 supported.

@@ -7,7 +7,7 @@ Pydantic schemas and plain records. SQLAlchemy Core is confined to Alembic migra
 
 | Owner | Responsibility |
 | --- | --- |
-| app/main.py | Lifespan constructs one settings object, two bounded pools and app-owned telemetry/logger. Validate supported schema/head before serving; close on startup failure. |
+| app/main.py | Lifespan constructs one settings object, one bounded pool and app-owned telemetry/logger. Check connectivity and supported revision before serving; close on startup failure. |
 | app/core/config.py | Immutable Settings(BaseSettings), source selection, aliases and budget validation; no import-time loading. |
 | app/core/request_context.py | Scoped ContextVars for immutable correlation/request fields and safe snapshots; no HTTP/storage dependency. |
 | app/core/logging.py | Dedicated structured logger, severity filter, finite event/field schema and safe exception classification; app-owned bounded sink, no root/global handler mutation. |
@@ -18,7 +18,7 @@ Pydantic schemas and plain records. SQLAlchemy Core is confined to Alembic migra
 | app/services/idempotency.py | Lightweight claim/resolve decision only. Uses storage helpers; does not execute callbacks/payments, interpret payment response bodies, own response capture or recovery loops. |
 | app/services/payments.py | Monetary operations only: indexed resolution, ordered firm locks, funds/overflow checks, balance deltas and ordered inserts. |
 | app/db/idempotency.py | Claim/lookups, guards, receipts and conditional publication SQL; no financial service calls or hidden commit. |
-| app/db/database.py | Pool, supervised transaction/timeout/cancellation boundaries and exact schema/revision oracle. |
+| app/db/database.py | Pool, supervised transaction/timeout/cancellation boundaries and supported Alembic revision gate. |
 | app/db/idempotency_maintenance.py | Explicit finite reconciliation/cleanup CLI and bounded per-generation work; no monetary execution. |
 | app/models/idempotency.py | Typed decisions, admission token, generation/owner and opaque stored-result envelope. |
 | migrations/versions/0002_request_lifecycle.py | Transactional state/guard/receipt migration and legacy retention cutover; old revision remains unchanged. |
@@ -182,7 +182,7 @@ not a fabricated completion. Python UUID generation inside migration avoids an e
 Validate existing result envelopes before adopting them. Preserve all firms/payments,
 balances, sequences and stored JSON semantics. Record 0002 only with the full successful
 transaction; retain advisory migration serialization and finite connection/SQL bounds.
-Startup requires exact supported structure and packaged 0002 head. Empty install applies
+Startup checks connectivity and the packaged 0002 head. Migrations own current schema integrity. Empty install applies
 0001 then 0002; legacy unversioned adoption still verifies 0001 before advancing. Reject
 destructive 0002 downgrade before mutation. Stop/drain old writers before upgrade.
 
@@ -211,15 +211,11 @@ Preserve pool_min<=pool_max, P*pool_max<=C, lock<statement<transaction, idle<tra
 the existing budget validation. Multi-phase A/B execution additionally uses one absolute
 asyncio timeout across phases, never a fresh budget per checkout or transaction.
 
-PAYMENTS_IDEMPOTENCY_POOL_MAX selects A's share of the combined POOL_MAX, default1.
-Require 1 <= IDEMPOTENCY_POOL_MAX < POOL_MAX; B gets the remainder. This is an architecture
-choice to keep short lifecycle lookups available while B is busy, not a capacity claim.
-Split POOL_MIN deterministically: A min=min(POOL_MIN,A max), B min=remaining POOL_MIN.
-Both pools share a bounded acquisition-admission counter/queue capped by POOL_MAX_WAITING;
-do not double the allowed waiters. Existing pool connection/queue gauges report combined
-pressure with at most a finite lifecycle/business role label. Each pool uses the existing
-safe borrow/return lifecycle. Maintenance allocation remains part of the deployment budget.
-Distinct pools guarantee A and B cannot accidentally reuse the same backend session.
+One native AsyncConnectionPool owns the declared POOL_MIN, POOL_MAX and POOL_MAX_WAITING.
+POOL_MAX may be1. No partition setting, shared admission counter, peer list or aggregate
+statistics adapter is needed. A, B and publication use successive independent transactions;
+physical backend reuse is allowed. Metrics read the native pool statistics. Keep the
+version-bound cancelled-waiter pruning and cancellation-safe return adapters.
 
 Existing numeric defaults remain local illustrations: C=8, P=2, pool_min=1, pool_max=4,
 max_waiting=4, acquire=1000ms, connect=2s, statement=3000ms, lock=2000ms, idle=5000ms,
@@ -269,3 +265,8 @@ response statuses, correlation across async cleanup, INFO/DEBUG filtering and re
 all levels, queue failures, metric outcomes and readiness isolation. Preserve pool handoff,
 real transport cancellation/commit uncertainty and exact money/sample invariants. Fresh full
 candidate checks, independent complete-source review and separate audited acceptance remain.
+
+The runtime database module owns revision checking, not a structural schema oracle.
+Immutable revisions retain their compatibility entry point, delegating only legacy
+adoption verification to migrations/legacy_schema.py. Alembic DDL and PostgreSQL enforce
+current constraints; migration tests verify them. No current-schema postflight oracle runs.

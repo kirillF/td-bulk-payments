@@ -589,7 +589,16 @@ def lifecycle_deadline(state: dict[str, Any], task: str) -> float:
     )
     for name, expected in value["artifacts"].items():
         if digest(Path(name).read_bytes()) != expected:
-            raise ValueError("Continuation artifact changed")
+            # The completed continuation bound the then-live feature contract.
+            # Preserve that exact historical snapshot while authenticating its
+            # explicitly approved successor; never rewrite the old approval.
+            frozen = STATE / "correlation-settings-aligned-amendment/postimages/feature.json"
+            if (
+                name != str(ROOT / "docs/features/bulk-payments/feature.json")
+                or digest(frozen.read_bytes()) != expected
+            ):
+                raise ValueError("Continuation artifact changed")
+            feature_authority(Path(state["payload"]))
     if (
         attempt["deadline_epoch"] != value["original_deadline_epoch"]
         or attempt["started_epoch"] != value["original_started_epoch"]
@@ -668,6 +677,46 @@ def lifecycle_design_overrides(feature: dict[str, Any], prior: dict[str, str]) -
     return result
 
 
+SINGLE_POOL_AMENDMENT = "18c6b7c7b4ec54af9229a648f6076b5f9976a874ae2d8f73155b331b2ab00d2a"
+
+
+def single_pool_design_overrides(prior: dict[str, str]) -> dict[str, str]:
+    """Authenticate approved semantic alignment without rewriting historical payloads."""
+    amended = approval(
+        STORE / f"{SINGLE_POOL_AMENDMENT}.payload.json",
+        {
+            "purpose": "project-local-single-pool-alembic-contract-amendment-v1",
+            "project": str(ROOT),
+            "scope_id": "bulk-payments",
+            "parent_implementation_approval_sha256": LIFECYCLE_AMENDMENT,
+        },
+    )
+    for name, expected in amended["artifacts"].items():
+        path = Path(name)
+        if path.is_symlink() or ROOT not in path.resolve().parents:
+            raise ValueError("Simplification artifact escapes project")
+        if digest(path.read_bytes()) != expected:
+            raise ValueError("Approved simplification artifact changed")
+    directory = STATE / "single-pool-alembic-amendment"
+    baseline = json.loads((directory / "source-baseline.json").read_text())["files"]
+    alignment = json.loads((directory / "contract-alignment.json").read_text())
+    if alignment["approval_sha256"] != SINGLE_POOL_AMENDMENT:
+        raise ValueError("Unknown contract alignment authority")
+    changes = alignment["changes"]
+    expected_paths = {name for name in prior if name.startswith("docs/features/")}
+    if set(changes) != expected_paths:
+        raise ValueError("Unexpected simplification contract paths")
+    result = dict(prior)
+    for name, change in changes.items():
+        if change["preimage_sha256"] != prior[name] or baseline.get(name) != prior[name]:
+            raise ValueError("Simplification does not extend approved preimages")
+        snapshot = directory / "aligned-contracts" / Path(name).name
+        if snapshot.is_symlink() or digest(snapshot.read_bytes()) != change["postimage_sha256"]:
+            raise ValueError("Aligned contract snapshot changed")
+        result[name] = change["postimage_sha256"]
+    return result
+
+
 def feature_authority(payload: Path) -> dict[str, Any]:
     policy()
     value = approval(
@@ -684,6 +733,7 @@ def feature_authority(payload: Path) -> dict[str, Any]:
     overrides = versioned_design_overrides(value, overrides)
     overrides = aligned_alembic_overrides(value, overrides)
     overrides = lifecycle_design_overrides(value, overrides)
+    overrides = single_pool_design_overrides(overrides)
     for name, original in value["artifacts"].items():
         expected = overrides.get(name, original)
         path = ROOT / name

@@ -135,7 +135,6 @@ def test_sources_constructor_priority_and_isolation(tmp_path, monkeypatch):
     [
         {"pool_max": True},
         {"pool_max": 4.0},
-        {"idempotency_pool_max": 4},
         {"log_level": "VERBOSE"},
         {"log_queue_capacity": 0},
         {"trace_sample_ratio": float("nan")},
@@ -276,3 +275,9 @@ def settings_then(ctx, step):
         assert balances(ctx.db) == ctx.before and count(ctx.db, "payments") == 0
         return True
     return False
+
+
+def test_single_connection_pool_needs_no_partition_setting():
+    settings = Settings.local("postgresql://isolated", pool_max=1)
+    assert settings.pool_max == 1
+    assert "idempotency_pool_max" not in Settings.model_fields

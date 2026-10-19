@@ -17,9 +17,9 @@ idempotency checker calls the other or accepts a callback that executes the othe
 
 Database helpers own pooling, transactions, timeouts, cancellation and cleanup. Connection
 A handles short request lifecycle transactions; B handles the financial transaction.
-They are distinct physical sessions from two bounded app-owned pools. Their combined
-maximum stays within the existing per-process pool_max budget; they are never held
-simultaneously by a request. Release A before acquiring B and release B before finalizing on A.
+Both use successive checkouts from one bounded app-owned pool; physical sessions may be
+reused. Release A before acquiring B and release B before publication checkout.
+No connection, transaction or lock is held across these phases.
 No process-local cache or lock decides payment authority. Read/write coordination uses
 the same PostgreSQL primary; no lagging replica or Redis authority is introduced.
 
@@ -86,8 +86,8 @@ response-cache retention. Logs and metrics expose unresolved state and maintenan
 ## Resources and async ownership
 
 Retain configured connection allocation C, process count P including surge, and
-P * pool_max <= C, where pool_max is now the combined maximum of the lifecycle and
-business pools. The shared queued-acquisition bound also covers both pools. Pool min/max/queue and establishment/acquisition/SQL/lock/idle/
+P * pool_max <= C, where pool_max bounds the single per-instance pool. Its native
+queued-acquisition bound applies to every checkout. Pool min/max/queue and establishment/acquisition/SQL/lock/idle/
 transaction waits remain finite. Local settings are illustrative, not production capacity.
 The same absolute request deadline covers A claim, B work, A publication and bounded
 cleanup; each phase uses the remaining implicit asyncio timeout rather than a fresh full
@@ -136,7 +136,7 @@ entries get 24 hours from one transactional migration cutover timestamp; never e
 old keys on deploy. Incomplete legacy records fail migration rather than become new work.
 Old app instances must be stopped/drained before the new stateful writer starts; mixed
 old/new writers are unsupported. Migration precedes startup; application requests do no DDL.
-Schema/revision failure fails startup; migration failure rolls back changes and revision.
+Connectivity/revision failure fails startup; migration failure rolls back changes and revision.
 Downgrade that would discard receipts or state is refused before mutation.
 
 ## Risks and alternative
@@ -158,3 +158,8 @@ Verify safe fallback headers, context isolation, INFO/DEBUG filtering, redaction
 precedence, bounded logging degradation and final real container HTTP behavior.
 Exact candidate-bound integration, independent complete-source review and separately
 audited final acceptance remain required. This document is an unapproved postimage.
+
+Schema structure is owned by Alembic migrations and PostgreSQL constraints. Startup checks
+connectivity and the packaged supported revision; it does not reconstruct the schema from
+application catalogs or certify manual schema drift. Legacy adoption alone retains a
+frozen migration-only compatibility check. Schema changes must use explicit migrations.

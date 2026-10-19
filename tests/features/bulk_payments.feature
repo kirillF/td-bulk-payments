@@ -573,13 +573,20 @@ Feature: Atomic and idempotent bulk settlement between firms
     And no financial rows or balances change and unrelated generations remain intact
 
   @SC-57
-  Scenario: Two transaction sessions share one request budget and bounded pool
-    Given an admitted request uses distinct lifecycle and business pool sessions for A and B
+  Scenario: Independent transactions share one request budget and bounded pool
+    Given an admitted request uses successive lifecycle and business checkouts from one bounded pool
     When each phase is observed through independent database transactions
-    Then backend-session evidence confirms A and B are distinct
+    Then physical backend reuse is permitted between independent transactions
     And A is released before B checkout and B is released before publication checkout
-    And combined connection and queued-acquisition counts stay within the declared allocation
-    And no transaction or row lock spans both sessions and no checkout creates a new operation budget
+    And native connection and queued-acquisition counts stay within the declared allocation
+    And no transaction or row lock spans phases and no checkout creates a new operation budget
     And timeout or cancellation at every boundary joins owned work and preserves existing pool handoff rules
     And exhausted capacity returns bounded safe failure without stranding pool capacity or duplicating effects
     And any remaining processing entry is retained for safe bounded recovery
+
+  @SC-58
+  Scenario: Alembic owns schema integrity and startup checks its supported revision
+    Given the database was upgraded through Alembic
+    When the service starts against the supported revision
+    Then startup checks revision without reconstructing application schema catalogs
+    And migration-created constraints reject invalid balances and duplicate firm UUIDs

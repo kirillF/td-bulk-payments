@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from app.api.router import install_routes
 from app.core.config import Settings
 from app.core.observability import RequestTelemetryMiddleware, Telemetry
-from app.db.database import AcquisitionBudget, create_pool, run_owned, validate_schema
+from app.db.database import create_pool, run_owned, validate_revision
 
 
 def create_app(configuration: Settings | str | None = None) -> FastAPI:
@@ -21,27 +21,22 @@ def create_app(configuration: Settings | str | None = None) -> FastAPI:
             else configuration or Settings.from_env()
         )
         application.state.settings = settings
-        admission = AcquisitionBudget(settings.pool_max_waiting)
-        pool = create_pool(settings, role="business", admission=admission)
-        lifecycle = create_pool(settings, role="lifecycle", admission=admission)
-        pool.peers = lifecycle.peers = (pool, lifecycle)
+        pool = create_pool(settings)
         telemetry = Telemetry(settings=settings)
         application.state.telemetry = telemetry
         try:
             async with asyncio.timeout(settings.startup_timeout_ms / 1000):
-                await lifecycle.open(wait=True, timeout=settings.startup_timeout_ms / 1000)
                 await pool.open(wait=True, timeout=settings.startup_timeout_ms / 1000)
                 await run_owned(
-                    pool, validate_schema, settings.startup_timeout_ms, settings.response_margin_ms
+                    pool,
+                    validate_revision,
+                    settings.startup_timeout_ms,
+                    settings.response_margin_ms,
                 )
             application.state.pool = pool
-            application.state.lifecycle_pool = lifecycle
             yield
         finally:
-            await asyncio.gather(
-                pool.close(timeout=settings.startup_timeout_ms / 1000),
-                lifecycle.close(timeout=settings.startup_timeout_ms / 1000),
-            )
+            await pool.close(timeout=settings.startup_timeout_ms / 1000)
             telemetry.close()
 
     application = FastAPI(title="Firm Payments", version="0.1.0", lifespan=lifespan)

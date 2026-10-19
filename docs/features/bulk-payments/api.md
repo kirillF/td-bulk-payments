@@ -161,13 +161,12 @@ precedence is explicit configuration > process environment > literal project-roo
 permitted defaults. Explicit mapping/local factories disable ambient sources. No import-time
 loading or os.environ mutation; no settings/secret dump in errors. New PAYMENTS_LOG_LEVEL
 accepts DEBUG/INFO/WARNING/ERROR/CRITICAL case-insensitively, default INFO. Higher thresholds
-intentionally suppress INFO visibility. New PAYMENTS_IDEMPOTENCY_POOL_MAX defaults1 and partitions the existing combined POOL_MAX;
-two app-owned pools use distinct lifecycle/business sessions without doubling connection
-or waiter budgets. No new configurable TTL is introduced.
+intentionally suppress INFO visibility. One bounded app-owned pool serves successive lifecycle and business transactions;
+physical backend reuse is allowed and no partition setting is required.
 
 python -m app.db.migrate and alembic upgrade head use the shared safe configuration source
 policy, finite waits and advisory-serialized transactional Alembic environment. Package0002
-with the production image; exact supported head plus structure required at startup. Drain
+with the production image; connectivity and exact supported Alembic head required at startup. Drain
 old app writers before upgrade. Preserve financial and replay state; refuse destructive
 state/receipt downgrade. Missing/incompatible head never triggers automatic request DDL.
 

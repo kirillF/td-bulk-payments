@@ -229,3 +229,23 @@ def test_delivery_requires_dependencies_and_complete_checks(tmp_path, monkeypatc
     )
     with pytest.raises(ValueError, match="stale prerequisite"):
         workflow.record_delivery(payload, "second", {"unit": evidence})
+
+
+def test_single_pool_alignment_rejects_wrong_prior_and_changed_snapshot(monkeypatch):
+    directory = workflow.STATE / "single-pool-alembic-amendment"
+    alignment = json.loads((directory / "contract-alignment.json").read_text())
+    prior = {name: change["preimage_sha256"] for name, change in alignment["changes"].items()}
+    assert workflow.single_pool_design_overrides(prior)
+    wrong = dict(prior)
+    wrong["docs/features/bulk-payments/api.md"] = "wrong"
+    with pytest.raises(ValueError, match="preimages"):
+        workflow.single_pool_design_overrides(wrong)
+    original = Path.read_bytes
+    snapshot = directory / "aligned-contracts" / "api.md"
+
+    def altered(path):
+        return b"changed" if path == snapshot else original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", altered)
+    with pytest.raises(ValueError, match="snapshot changed"):
+        workflow.single_pool_design_overrides(prior)

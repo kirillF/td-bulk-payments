@@ -384,6 +384,10 @@ def remove_fault(url):
 
 
 def migration_given(ctx, step):
+    if step == "the database was upgraded through Alembic":
+        ctx.schema_gate_ready = True
+        return True
+
     if step == "the old supported schema contains committed success and business-rejection results":
         from psycopg.types.json import Jsonb
 
@@ -460,6 +464,12 @@ def migration_given(ctx, step):
 
 
 def migration_when(ctx, step):
+    if step == "the service starts against the supported revision":
+        assert ctx.schema_gate_ready
+        test_startup_uses_revision_gate_and_migrations_enforce_integrity(ctx.db, ctx.monkeypatch)
+        ctx.schema_gate_verified = True
+        return True
+
     if step == "the lifecycle revision upgrades at one database cutover timestamp":
         migrate(ctx.migration_url)
         return True
@@ -497,6 +507,13 @@ def migration_when(ctx, step):
 
 
 def migration_then(ctx, step):
+    if step in {
+        "startup checks revision without reconstructing application schema catalogs",
+        "migration-created constraints reject invalid balances and duplicate firm UUIDs",
+    }:
+        assert ctx.schema_gate_verified
+        return True
+
     if (
         step
         == "original responses, payment IDs, balances, rows and sequence identities are preserved"
@@ -845,3 +862,42 @@ def test_migration_timeouts_apply_before_dialect_initialization(database_url, mo
     with new_database(database_url) as url:
         migrate(url)
     assert observed
+
+
+def test_startup_uses_revision_gate_and_migrations_enforce_integrity(database_url, monkeypatch):
+    from .conftest import running_app
+
+    with new_database(database_url) as url:
+        migrate(url)
+        queries = []
+        original = psycopg.AsyncConnection.execute
+
+        async def capture(connection, query, *args, **kwargs):
+            queries.append(str(query))
+            return await original(connection, query, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(psycopg.AsyncConnection, "execute", capture)
+            with running_app(url) as app:
+                assert app.state.test_client.get("/health/ready").status_code == 200
+        assert any("SELECT version_num FROM alembic_version" in query for query in queries)
+        assert not any(
+            catalog in query.lower()
+            for query in queries
+            for catalog in ["pg_attribute", "pg_constraint", "pg_index", "information_schema"]
+        )
+        with psycopg.connect(url, autocommit=True) as connection:
+            with pytest.raises(psycopg.errors.CheckViolation):
+                connection.execute(
+                    "INSERT INTO firms (name,balance_cents,uuid) VALUES ('invalid',-1,%s)",
+                    (str(uuid.uuid4()),),
+                )
+            firm_uuid = str(uuid.uuid4())
+            connection.execute(
+                "INSERT INTO firms (name,balance_cents,uuid) VALUES ('valid',0,%s)", (firm_uuid,)
+            )
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                connection.execute(
+                    "INSERT INTO firms (name,balance_cents,uuid) VALUES ('duplicate',0,%s)",
+                    (firm_uuid,),
+                )

@@ -2,7 +2,6 @@
 
 from contextlib import nullcontext
 
-import psycopg
 from alembic import context
 from alembic.util import CommandError
 from sqlalchemy import create_engine
@@ -10,7 +9,6 @@ from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.pool import NullPool
 
 from app.core.config import load_environment
-from app.db.database import validate_schema_sync
 
 
 def run(connection: Connection) -> None:
@@ -22,10 +20,6 @@ def run(connection: Connection) -> None:
         context.configure(connection=connection, target_metadata=None)
         with context.begin_transaction():
             context.run_migrations()
-        driver = connection.connection.driver_connection
-        if not isinstance(driver, psycopg.Connection):
-            raise CommandError("Unsupported migration connection")
-        validate_schema_sync(driver)
 
 
 def online() -> None:

@@ -61,7 +61,7 @@ exposure; those operating qualifications are outside this take-home.
 
 ## Async operation budgets
 
-Each process owns separate lifecycle and business AsyncConnectionPools on its lifespan event loop. Their combined maximum and minimum use the existing declared pool allocation, and pending acquisitions share its waiter bound. Payments and readiness await database I/O. One absolute asyncio deadline stops financial work before the operation budget's configured margin, reserving it for connection/task cleanup and response construction. Expiry closes/discards the borrowed session before cancelling and joining the supervised operation. No payment task is detached. PostgreSQL timeouts remain enabled as independent backstops. A timeout during COMMIT is uncertain; retry the same key. Event-loop scheduling and host/network failures do not establish an end-to-end SLA.
+Each process owns one bounded AsyncConnectionPool on its lifespan event loop. Lifecycle and business phases use successive independent transactions/checkouts, with physical backend reuse allowed. Native connection and waiter limits apply to the single pool. Payments and readiness await database I/O. One absolute asyncio deadline stops financial work before the operation budget's configured margin, reserving it for connection/task cleanup and response construction. Expiry closes/discards the borrowed session before cancelling and joining the supervised operation. No payment task is detached. PostgreSQL timeouts remain enabled as independent backstops. A timeout during COMMIT is uncertain; retry the same key. Event-loop scheduling and host/network failures do not establish an end-to-end SLA.
 
 Configuration loads repository-root `.env` defaults without changing `os.environ`,
 then applies process environment overrides. No dotenv load happens at import time.
@@ -77,8 +77,8 @@ lock waits and statements are bounded; an advisory transaction lock precedes ver
 inspection. Migration errors are sanitized. Do not stamp an unknown database or run
 a destructive initial downgrade; retain data and investigate incompatibility.
 
-Legacy adoption verifies the complete supported schema through the same structural
-oracle as async service startup. Columns, identities, validated constraints, UUID
+Legacy adoption verifies the supported legacy schema through a frozen migration-only
+validator. Startup checks connectivity and the supported Alembic revision only. Columns, identities, validated constraints, UUID
 index/collation and timestamp defaults must match. A failed head-recording transaction
 preserves legacy rows and leaves no new version state. Investigate mismatches rather
 than changing or stamping a financial database automatically.
@@ -105,8 +105,11 @@ requirements remain. Normal precedence is explicit construction > process enviro
 literal local dotenv > permitted defaults. Explicit local/test mapping factories bypass
 ambient sources entirely, including telemetry settings; they never mutate os.environ.
 
-PAYMENTS_IDEMPOTENCY_POOL_MAX defaults1 and must be smaller than the combined
-PAYMENTS_POOL_MAX; both roles retain at least one connection. Metrics aggregate both pool
-roles without adding request labels. PAYMENTS_LOG_LEVEL defaultsINFO and accepts DEBUG,
+One pool uses PAYMENTS_POOL_MAX and its native waiter bound; no partition setting or
+aggregate statistics adapter is needed. PAYMENTS_LOG_LEVEL defaultsINFO and accepts DEBUG,
 INFO, WARNING, ERROR, CRITICAL case-insensitively. Higher thresholds intentionally suppress
 INFO traffic logs. Invalid configuration diagnostics omit raw URL/secret-bearing inputs.
+
+Manage all schema changes through Alembic. Startup does not certify manually altered
+objects whose Alembic revision is unchanged; investigate drift and use an explicit repair
+migration or restore a known-good database rather than runtime schema repair.

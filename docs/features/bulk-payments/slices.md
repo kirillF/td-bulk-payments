@@ -1,8 +1,9 @@
-# Firm Payments — proposed current slices
+# Firm Payments — current slices
 
-Six new sequential slices extend the existing delivered-local Alembic baseline. All prior
-contracts, delivery records and consumed counters remain immutable. These postimages do
-not authorize runtime execution or claim acceptance. Container schema packaging is first.
+Seven sequential slices. Migration and typed-settings deliveries remain historical local
+evidence; the approved single-pool/Alembic amendment supersedes conflicting target choices.
+All prior approvals, failures, deadlines and counters remain immutable. The simplification
+is a focused correction; existing per-slice caps remain unchanged. Container delivery was first.
 
 ## lifecycle-container-migration
 
@@ -64,7 +65,7 @@ Acceptance:
 
 - Resolve and lock Python3.15-compatible pydantic-settings without unrelated upgrades.
 - Configured budgets remain required; integer/bool handling, algebra, literal dotenv, mapping isolation and environment precedence preserved.
-- Two physical pools partition existing connection/minimum budgets and share queued-acquisition bounds; lifecycle share is typed and validated.
+- Typed pool budgets remain bounded; the following simplification supersedes the originally delivered two-pool partition.
 - Telemetry consumes injected settings; safe startup failure never dumps URL or raw ValidationError input.
 
 Owned paths (shared extensions are sequential):
@@ -94,57 +95,59 @@ tests/conftest.py
 
 Registered checks: baseline-syntax, local-policy, quality, money-unit, container-boot.
 
-## correlated-structured-logging
+## single-pool-alembic-simplification
 
-Safe X-Correlation-ID and dedicated leveled JSON logger cover HTTP, use-case and storage operations.
+One bounded pool serves successive independent transactions; Alembic owns schema structure and startup checks connectivity and supported revision.
 
 Dependencies: typed-settings.
 
-Requirements: FR-15, FR-16, FR-17, NFR-6, NFR-7, NFR-9, NFR-10, NFR-12.
-
-Invariants: INV-1, INV-2, INV-3, INV-4, INV-5, INV-6, INV-7, INV-8.
-
-Scenarios: SC-39, SC-40, SC-41, SC-42, SC-43, SC-44, SC-47.
+Scenarios: SC-20, SC-45, SC-46, SC-58.
 
 Acceptance:
 
-- Header grammar/fallback/cardinality and all application response statuses; current metadata independent of durable result.
-- INFO arrival/completion, finite WARNING/ERROR failures, DEBUG all meaningful stages and ordinal-only insert progress.
-- Redaction at all levels, isolated contexts including cancellation/cleanup, app-owned handlers, bounded sink/export failure and threshold behavior.
+- One native bounded pool supports pool_max=1; no partition setting, custom admission counter or peer aggregation.
+- Separate successive lifecycle/business/publication checkouts may reuse physical sessions; safe cancellation and transaction handling remain.
+- Startup checks connectivity and supported revision only; frozen legacy verification is migration-only; committed migration revisions remain byte-identical.
+- Real PostgreSQL queue cancellation/recovery, migration rollback/legacy adoption and integrity constraints remain verified.
 
-Owned paths (shared extensions are sequential):
+Owned paths:
 
 ```text
-app/core/logging.py
-app/core/request_context.py
-app/core/observability.py
-app/schemas/headers.py
-app/main.py
-app/api/errors.py
-app/api/operations.py
-app/api/v1/payments.py
-app/services/payments.py
-app/services/idempotency.py
 app/db/database.py
-app/db/idempotency.py
-tests/test_observability.py
-tests/test_health.py
-tests/test_payments.py
-README.md
-docs/operations.md
-scripts/harness_checks.py
+app/main.py
+app/core/config.py
+app/core/observability.py
+migrations/__init__.py
+migrations/legacy_schema.py
+migrations/env.py
+tests/test_settings.py
+tests/test_resource_failures.py
+tests/test_migrations.py
 tests/test_journeys.py
 tests/features/bulk_payments.feature
-tests/conftest.py
+scripts/harness_checks.py
+scripts/project_workflow.py
+tests/test_project_workflow.py
+.env.example
+README.md
+docs/operations.md
+docs/features/bulk-payments/feature.json
+docs/features/bulk-payments/requirements.md
+docs/features/bulk-payments/architecture.md
+docs/features/bulk-payments/api.md
+docs/features/bulk-payments/slices.md
+docs/features/bulk-payments/code-design.md
+docs/features/bulk-payments/scenarios.feature
 ```
 
-Registered checks: baseline-syntax, local-policy, quality, observability.
+Registered checks: baseline-syntax, local-policy, quality, money-unit, container-boot.
+
 
 ## middleware-controller-idempotency
 
 Middleware admits/replays/conflicts; controller orchestrates independent payment service plus atomic B receipt and A publication.
 
-Dependencies: correlated-structured-logging.
+Dependencies: single-pool-alembic-simplification.
 
 Requirements: FR-1, FR-4, FR-5, FR-6, FR-7, FR-8, FR-18, FR-19, NFR-2, NFR-3.
 
@@ -192,11 +195,57 @@ tests/conftest.py
 
 Registered checks: baseline-syntax, local-policy, quality, atomic-api, idempotency, contention, resource-failures, observability.
 
+## correlated-structured-logging
+
+Safe X-Correlation-ID and dedicated leveled JSON logger cover HTTP, use-case and storage operations.
+
+Dependencies: middleware-controller-idempotency.
+
+Requirements: FR-15, FR-16, FR-17, NFR-6, NFR-7, NFR-9, NFR-10, NFR-12.
+
+Invariants: INV-1, INV-2, INV-3, INV-4, INV-5, INV-6, INV-7, INV-8.
+
+Scenarios: SC-39, SC-40, SC-41, SC-42, SC-43, SC-44, SC-47.
+
+Acceptance:
+
+- Header grammar/fallback/cardinality and all application response statuses; current metadata independent of durable result.
+- INFO arrival/completion, finite WARNING/ERROR failures, DEBUG all meaningful stages and ordinal-only insert progress.
+- Redaction at all levels, isolated contexts including cancellation/cleanup, app-owned handlers, bounded sink/export failure and threshold behavior.
+
+Owned paths (shared extensions are sequential):
+
+```text
+app/core/logging.py
+app/core/request_context.py
+app/core/observability.py
+app/schemas/headers.py
+app/main.py
+app/api/errors.py
+app/api/operations.py
+app/api/v1/payments.py
+app/services/payments.py
+app/services/idempotency.py
+app/db/database.py
+app/db/idempotency.py
+tests/test_observability.py
+tests/test_health.py
+tests/test_payments.py
+README.md
+docs/operations.md
+scripts/harness_checks.py
+tests/test_journeys.py
+tests/features/bulk_payments.feature
+tests/conftest.py
+```
+
+Registered checks: baseline-syntax, local-policy, quality, observability.
+
 ## fenced-recovery-ttl
 
 Finite maintenance plus conditional publication closes the dual-write gap and enforces safe24h generation reuse.
 
-Dependencies: middleware-controller-idempotency.
+Dependencies: correlated-structured-logging.
 
 Requirements: FR-5, FR-7, FR-8, FR-19, NFR-3, NFR-9.
 
@@ -247,11 +296,11 @@ Requirements: FR-1, FR-2, FR-3, FR-4, FR-5, FR-6, FR-7, FR-8, FR-9, FR-10, FR-11
 
 Invariants: INV-1, INV-2, INV-3, INV-4, INV-5, INV-6, INV-7, INV-8.
 
-Scenarios: SC-1, SC-2, SC-3, SC-4, SC-5, SC-6, SC-7, SC-8, SC-9, SC-10, SC-11, SC-12, SC-13, SC-14, SC-15, SC-16, SC-17, SC-18, SC-19, SC-20, SC-21, SC-22, SC-23, SC-24, SC-25, SC-26, SC-27, SC-28, SC-29, SC-30, SC-31, SC-32, SC-33, SC-34, SC-35, SC-36, SC-37, SC-38, SC-39, SC-40, SC-41, SC-42, SC-43, SC-44, SC-45, SC-46, SC-47, SC-48, SC-49, SC-50, SC-51, SC-52, SC-53, SC-54, SC-55, SC-56, SC-57.
+Scenarios: SC-1, SC-2, SC-3, SC-4, SC-5, SC-6, SC-7, SC-8, SC-9, SC-10, SC-11, SC-12, SC-13, SC-14, SC-15, SC-16, SC-17, SC-18, SC-19, SC-20, SC-21, SC-22, SC-23, SC-24, SC-25, SC-26, SC-27, SC-28, SC-29, SC-30, SC-31, SC-32, SC-33, SC-34, SC-35, SC-36, SC-37, SC-38, SC-39, SC-40, SC-41, SC-42, SC-43, SC-44, SC-45, SC-46, SC-47, SC-48, SC-49, SC-50, SC-51, SC-52, SC-53, SC-54, SC-55, SC-56, SC-57, SC-58.
 
 Acceptance:
 
-- Bind all57 scenarios and every97 expanded case; changed old idempotency semantics must be deliberate, not a removed check.
+- Bind all58 scenarios and every98 expanded case; changed old idempotency semantics must be deliberate, not a removed check.
 - All12 groups on exact source/environment, genuine Docker/Testcontainers contention/faults, sequence gap mutant, money sample and real Linux HTTP status/header/cache/TTL flow.
 - Candidate-bound full-source review fits existing640000/1310720 caps and900-second bound; preflight fails closed, no source truncation.
 - Existing .env.example review alias request is still unapproved and bound to the older source. Prepare fresh exact representation exception if necessary; no inferred review permission.
@@ -315,27 +364,3 @@ alembic.ini
 ```
 
 Registered checks: baseline-syntax, local-policy, quality, container-boot, money-unit, atomic-api, uuid-index, idempotency, contention, resource-failures, observability, container-http.
-
-## Budgets, commits and gates
-
-Each new slice has a1200-second aggregate execution allowance, including at least20 percent
-for verification/handoff; record real start/deadline, attempts and failures. These are new
-work scopes, never reset historical counters or reopen the old supplemental round4 pool.
-Focused checks run during edits; required registered groups must pass before local delivery.
-No model worker or delegation is introduced. The coordinator follows the project-local
-trusted-host policy and claims dependency-ready Beads work. Tests can run with authorized
-local Docker; missing prerequisites are failures, not skipped acceptance.
-
-Follow COMMIT_POLICY.md: exact approved document checkpoint, then each coherent validated
-slice/correction; explicit staging paths, preserve unrelated work, no private approvals,
-.env or generated evidence. No automatic publication/history rewrite. Baseline/container
-prerequisites and exact amendments must authenticate before running bound check wrappers.
-
-Final coverage is57 scenarios /97 expanded cases across12 existing registered groups.
-Check definitions in feature.json map each obligation; future unmapped/missing bindings fail.
-Earlier checks cannot certify the new candidate. Full review uses unchanged source/prompt
-caps640000/1310720 and900-second timeout, no truncation. The older unapproved .env.example
-representation exception cannot certify this new source. If a fresh exact exception is
-needed, prepare it and stop at that gate. Final acceptance has a separate exact audited
-request. Implementation approval neither spends an exhausted repair allowance nor waives
-review, receipt/fencing tests, or separate acceptance.

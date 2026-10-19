@@ -12,49 +12,53 @@ from app.core.config import Settings
 from .conftest import PAYER, balances, borrowed, count, payload, post, running_app
 
 
-def test_distinct_pools_partition_budget_and_share_waiter_bound(seeded_database):
+def test_single_pool_waiter_bound_and_cancelled_checkout_recovery(seeded_database):
     import asyncio
 
     from psycopg_pool import TooManyRequests
 
-    settings = Settings.local(seeded_database, pool_max=2, pool_max_waiting=1)
+    settings = Settings.local(seeded_database, pool_max=1, pool_max_waiting=1)
     with running_app(settings) as app:
 
         async def inspect():
-            business, lifecycle = app.state.pool, app.state.lifecycle_pool
-            assert business is not lifecycle and business.admission is lifecycle.admission
-            assert business.max_size + lifecycle.max_size == settings.pool_max
-            assert business.min_size + lifecycle.min_size == settings.pool_min
-            first = await business.getconn()
-            second = await lifecycle.getconn()
+            pool = app.state.pool
+            assert not hasattr(app.state, "lifecycle_pool")
+            assert pool.max_size == settings.pool_max
+            first = await pool.getconn()
             queued = None
             try:
-                assert first.info.backend_pid != second.info.backend_pid
-                queued = asyncio.create_task(business.getconn(timeout=0.3))
+                queued = asyncio.create_task(pool.getconn(timeout=0.3))
                 async with asyncio.timeout(1):
-                    while business.get_stats().get("requests_waiting", 0) != 1:
+                    while pool.get_stats().get("requests_waiting", 0) != 1:
                         await asyncio.sleep(0)
                 with pytest.raises(TooManyRequests):
-                    await lifecycle.getconn(timeout=0.1)
+                    await pool.getconn(timeout=0.1)
                 queued.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await queued
-                assert business.admission.pending == 0
-                assert business.get_stats().get("requests_waiting", 0) == 0
-                assert business.aggregate_stats()["pool_size"] <= settings.pool_max
+                assert pool.get_stats().get("requests_waiting", 0) == 0
+                assert pool.get_stats()["pool_size"] <= settings.pool_max
             finally:
                 if queued is not None and not queued.done():
                     queued.cancel()
                     await asyncio.gather(queued, return_exceptions=True)
-                await business.putconn(first)
-                await lifecycle.putconn(second)
+                await pool.putconn(first)
+            # A released checkout may reuse its backend in the next independent transaction.
+            second = await pool.getconn(timeout=0.3)
+            try:
+                async with second.transaction():
+                    assert (await (await second.execute("SELECT 1 AS value")).fetchone())[
+                        "value"
+                    ] == 1
+            finally:
+                await pool.putconn(second)
 
         app.state.test_client.portal.call(inspect)
 
 
 def test_pool_queue_and_acquisition_bounds(seeded_database):
     settings = Settings.local(
-        seeded_database, pool_min=1, pool_max=2, pool_max_waiting=1, acquire_timeout_ms=150
+        seeded_database, pool_min=1, pool_max=1, pool_max_waiting=1, acquire_timeout_ms=150
     )
     with running_app(settings) as app:
         with borrowed(app):
@@ -298,7 +302,7 @@ def test_stalled_tcp_replies_expire_discard_and_recover(seeded_database, phase):
         settings = Settings.local(
             fault.url,
             pool_min=1,
-            pool_max=2,
+            pool_max=1,
             acquire_timeout_ms=100,
             lock_timeout_ms=100,
             statement_timeout_ms=1000,
@@ -377,7 +381,7 @@ def test_external_cancellation_joins_operation_and_preserves_recovery(seeded_dat
         settings = Settings.local(
             fault.url,
             pool_min=1,
-            pool_max=2,
+            pool_max=1,
             acquire_timeout_ms=300,
             lock_timeout_ms=100,
             statement_timeout_ms=1000,
@@ -485,7 +489,7 @@ def test_checkout_handoff_has_no_cancellable_pruning_gap(seeded_database, monkey
     async def pay_bulk(pool, request, key):
         return await run_transaction(pool, lambda connection: execute(connection, request, key))
 
-    settings = Settings.local(seeded_database, pool_max=2)
+    settings = Settings.local(seeded_database, pool_max=1)
     with running_app(settings) as app:
 
         async def exercise():
@@ -578,7 +582,7 @@ def test_pre_handoff_pool_return_recovers_capacity(seeded_database, monkeypatch,
     from app.schemas.payments import BulkPayment
     from app.services.idempotency import execute
 
-    settings = Settings.local(seeded_database, pool_max=2)
+    settings = Settings.local(seeded_database, pool_max=1)
     with running_app(settings) as app:
 
         async def exercise():

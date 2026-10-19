@@ -460,7 +460,7 @@ class Telemetry:
 
     def metrics(self, pool: Any) -> bytes:
         try:
-            stats = pool.aggregate_stats() if hasattr(pool, "aggregate_stats") else pool.get_stats()
+            stats = pool.get_stats()
             self.connections.set(stats.get("pool_size", 0))
             self.waiters.set(stats.get("requests_waiting", 0))
             return generate_latest(self.registry)

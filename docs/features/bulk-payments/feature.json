@@ -324,13 +324,13 @@
     }
   ],
   "coverage_target": {
-    "expanded_cases": 97,
+    "expanded_cases": 98,
     "functional_requirements": 19,
     "groups": 12,
     "invariants": 8,
     "nonfunctional_requirements": 12,
-    "scenarios": 57,
-    "tasks": 6
+    "scenarios": 58,
+    "tasks": 7
   },
   "design_layers": {
     "architecture": "docs/features/bulk-payments/architecture.md",
@@ -403,7 +403,7 @@
     "worker_timeout_seconds": 1200
   },
   "project_local_execution": {
-    "feature_execution_approval": "Design-only approval f7717589c92f576e45765bb408822b0daf8229e6f9a8bdd44b936100120b2675 authorizes preparing these postimages. Exact new implementation request approval is required before applying them or executing new slices.",
+    "feature_execution_approval": "Implementation approval beb372ab543562b93fe9bffa3d7a951f5f5ffafba5a992240d55a44557cf6053 plus single-pool/Alembic contract amendment 18c6b7c7b4ec54af9229a648f6076b5f9976a874ae2d8f73155b331b2ab00d2a; prior history/caps remain unchanged.",
     "origin": "project-local-trusted-host-v1",
     "policy_document": "docs/harness/PROJECT_OVERRIDES.md",
     "policy_request_sha256": "a4d47cdc255ebc2e2081beb0b8badf0fcf3c1a3df06a369e788ee29f76024370",
@@ -500,7 +500,8 @@
     "SC-54",
     "SC-55",
     "SC-56",
-    "SC-57"
+    "SC-57",
+    "SC-58"
   ],
   "scope_id": "bulk-payments",
   "task_definitions": [
@@ -600,7 +601,7 @@
         "Resolve and lock Python3.15-compatible pydantic-settings without unrelated upgrades.",
         "Configured budgets remain required; integer/bool handling, algebra, literal dotenv, mapping isolation and environment precedence preserved.",
         "Telemetry consumes injected settings; safe startup failure never dumps URL or raw ValidationError input.",
-        "Two physical pools partition the existing connection/minimum budget and share queued-acquisition bounds; new lifecycle-share setting validates both pools retain capacity."
+        "Typed pool budgets remain bounded; the following simplification supersedes the original two-pool partition."
       ],
       "checks": [
         "baseline-syntax",
@@ -682,15 +683,17 @@
     },
     {
       "acceptance": [
-        "Header grammar/fallback/cardinality and all application response statuses; current metadata independent of durable result.",
-        "INFO arrival/completion, finite WARNING/ERROR failures, DEBUG all meaningful stages and ordinal-only insert progress.",
-        "Redaction at all levels, isolated contexts including cancellation/cleanup, app-owned handlers, bounded sink/export failure and threshold behavior."
+        "One native bounded pool supports pool_max=1; no partition setting, custom admission counter or peer aggregation.",
+        "Separate successive lifecycle/business/publication checkouts may reuse physical sessions; safe cancellation and transaction handling remain.",
+        "Startup checks connectivity and supported revision only; frozen legacy verification is migration-only; committed migration revisions remain byte-identical.",
+        "Real PostgreSQL queue cancellation/recovery, migration rollback/legacy adoption and integrity constraints remain verified."
       ],
       "checks": [
         "baseline-syntax",
         "local-policy",
         "quality",
-        "observability"
+        "money-unit",
+        "container-boot"
       ],
       "consequential_open_decisions": [],
       "context": [
@@ -709,7 +712,7 @@
         "docs/features/bulk-payments/code-design.md",
         "docs/features/bulk-payments/slices.md"
       ],
-      "id": "correlated-structured-logging",
+      "id": "single-pool-alembic-simplification",
       "invariants": [
         "INV-1",
         "INV-2",
@@ -726,52 +729,49 @@
         "1200 seconds aggregate per new slice, including at least20 percent verification/handoff; preserve historical allowances/counters.",
         "Use focused checks then required group checks, current-source evidence, explicit staging and granular local commits; no silent skip or false PASS."
       ],
-      "outcome": "Safe X-Correlation-ID and dedicated leveled JSON logger cover HTTP, use-case and storage operations.",
+      "outcome": "One bounded pool serves successive independent transactions; Alembic owns schema structure and startup checks connectivity and supported revision.",
       "owner": "project-local trusted coordinator; separate independent review and acceptance",
       "ownership": [
-        "app/core/logging.py",
-        "app/core/request_context.py",
-        "app/core/observability.py",
-        "app/schemas/headers.py",
-        "app/main.py",
-        "app/api/errors.py",
-        "app/api/operations.py",
-        "app/api/v1/payments.py",
-        "app/services/payments.py",
-        "app/services/idempotency.py",
         "app/db/database.py",
-        "app/db/idempotency.py",
-        "tests/test_observability.py",
-        "tests/test_health.py",
-        "tests/test_payments.py",
-        "README.md",
-        "docs/operations.md",
-        "scripts/harness_checks.py",
+        "app/main.py",
+        "app/core/config.py",
+        "app/core/observability.py",
+        "migrations/__init__.py",
+        "migrations/legacy_schema.py",
+        "migrations/env.py",
+        "tests/test_settings.py",
+        "tests/test_resource_failures.py",
+        "tests/test_migrations.py",
         "tests/test_journeys.py",
         "tests/features/bulk_payments.feature",
-        "tests/conftest.py"
+        "scripts/harness_checks.py",
+        "scripts/project_workflow.py",
+        "tests/test_project_workflow.py",
+        ".env.example",
+        "README.md",
+        "docs/operations.md",
+        "docs/features/bulk-payments/feature.json",
+        "docs/features/bulk-payments/requirements.md",
+        "docs/features/bulk-payments/architecture.md",
+        "docs/features/bulk-payments/api.md",
+        "docs/features/bulk-payments/slices.md",
+        "docs/features/bulk-payments/code-design.md",
+        "docs/features/bulk-payments/scenarios.feature"
       ],
       "requirements": [
-        "FR-15",
-        "FR-16",
-        "FR-17",
-        "NFR-6",
-        "NFR-7",
-        "NFR-9",
-        "NFR-10",
-        "NFR-12"
+        "FR-11",
+        "FR-13",
+        "NFR-3",
+        "NFR-4"
       ],
       "scenarios": [
-        "SC-39",
-        "SC-40",
-        "SC-41",
-        "SC-42",
-        "SC-43",
-        "SC-44",
-        "SC-47"
+        "SC-20",
+        "SC-45",
+        "SC-46",
+        "SC-58"
       ],
       "scope_id": "bulk-payments",
-      "title": "Trace request lifecycle across all layers"
+      "title": "Simplify database lifecycle and schema authority"
     },
     {
       "acceptance": [
@@ -798,7 +798,7 @@
         "docs/harness/COMMIT_POLICY.md"
       ],
       "dependencies": [
-        "correlated-structured-logging"
+        "single-pool-alembic-simplification"
       ],
       "design": [
         "docs/features/bulk-payments/requirements.md",
@@ -885,6 +885,99 @@
     },
     {
       "acceptance": [
+        "Header grammar/fallback/cardinality and all application response statuses; current metadata independent of durable result.",
+        "INFO arrival/completion, finite WARNING/ERROR failures, DEBUG all meaningful stages and ordinal-only insert progress.",
+        "Redaction at all levels, isolated contexts including cancellation/cleanup, app-owned handlers, bounded sink/export failure and threshold behavior."
+      ],
+      "checks": [
+        "baseline-syntax",
+        "local-policy",
+        "quality",
+        "observability"
+      ],
+      "consequential_open_decisions": [],
+      "context": [
+        "CODING_STANDARDS.md",
+        "docs/harness/PROJECT_OVERRIDES.md",
+        "docs/harness/COMMIT_POLICY.md"
+      ],
+      "dependencies": [
+        "middleware-controller-idempotency"
+      ],
+      "design": [
+        "docs/features/bulk-payments/requirements.md",
+        "docs/features/bulk-payments/scenarios.feature",
+        "docs/features/bulk-payments/architecture.md",
+        "docs/features/bulk-payments/api.md",
+        "docs/features/bulk-payments/code-design.md",
+        "docs/features/bulk-payments/slices.md"
+      ],
+      "id": "correlated-structured-logging",
+      "invariants": [
+        "INV-1",
+        "INV-2",
+        "INV-3",
+        "INV-4",
+        "INV-5",
+        "INV-6",
+        "INV-7",
+        "INV-8"
+      ],
+      "kind": "slice",
+      "nonfunctional": [
+        "Private sequential delivery only; no runtime execution before exact amendment approval.",
+        "1200 seconds aggregate per new slice, including at least20 percent verification/handoff; preserve historical allowances/counters.",
+        "Use focused checks then required group checks, current-source evidence, explicit staging and granular local commits; no silent skip or false PASS."
+      ],
+      "outcome": "Safe X-Correlation-ID and dedicated leveled JSON logger cover HTTP, use-case and storage operations.",
+      "owner": "project-local trusted coordinator; separate independent review and acceptance",
+      "ownership": [
+        "app/core/logging.py",
+        "app/core/request_context.py",
+        "app/core/observability.py",
+        "app/schemas/headers.py",
+        "app/main.py",
+        "app/api/errors.py",
+        "app/api/operations.py",
+        "app/api/v1/payments.py",
+        "app/services/payments.py",
+        "app/services/idempotency.py",
+        "app/db/database.py",
+        "app/db/idempotency.py",
+        "tests/test_observability.py",
+        "tests/test_health.py",
+        "tests/test_payments.py",
+        "README.md",
+        "docs/operations.md",
+        "scripts/harness_checks.py",
+        "tests/test_journeys.py",
+        "tests/features/bulk_payments.feature",
+        "tests/conftest.py"
+      ],
+      "requirements": [
+        "FR-15",
+        "FR-16",
+        "FR-17",
+        "NFR-6",
+        "NFR-7",
+        "NFR-9",
+        "NFR-10",
+        "NFR-12"
+      ],
+      "scenarios": [
+        "SC-39",
+        "SC-40",
+        "SC-41",
+        "SC-42",
+        "SC-43",
+        "SC-44",
+        "SC-47"
+      ],
+      "scope_id": "bulk-payments",
+      "title": "Trace request lifecycle across all layers"
+    },
+    {
+      "acceptance": [
         "Bounded CLI candidate/batch/total-time, no hidden scheduler or infinite retry; include maintenance process in deployment budget.",
         "Hold guard during recovery, validate receipt or fence no-effect abandoned owner; old B cannot recreate deleted guard or execute.",
         "Before/at/after TTL, no cache extension on replay, completed key can pay anew only after safe generation release.",
@@ -907,7 +1000,7 @@
         "docs/harness/COMMIT_POLICY.md"
       ],
       "dependencies": [
-        "middleware-controller-idempotency"
+        "correlated-structured-logging"
       ],
       "design": [
         "docs/features/bulk-payments/requirements.md",
@@ -981,7 +1074,7 @@
     },
     {
       "acceptance": [
-        "Bind all57 scenarios and every97 expanded case; changed old idempotency semantics must be deliberate, not a removed check.",
+        "Bind all58 scenarios and every98 expanded case; changed old idempotency semantics must be deliberate, not a removed check.",
         "All12 groups on exact source/environment, genuine Docker/Testcontainers contention/faults, sequence gap mutant, money sample and real Linux HTTP status/header/cache/TTL flow.",
         "Candidate-bound full-source review fits existing640000/1310720 caps and900-second bound; preflight fails closed, no source truncation.",
         "Existing .env.example review alias request is still unapproved and bound to the older source. Prepare fresh exact representation exception if necessary; no inferred review permission.",
@@ -1181,7 +1274,8 @@
         "SC-54",
         "SC-55",
         "SC-56",
-        "SC-57"
+        "SC-57",
+        "SC-58"
       ],
       "scope_id": "bulk-payments",
       "title": "Verify complete amended service and hand off for review"

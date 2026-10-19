@@ -118,7 +118,7 @@ its financial records or sequence state. Partial or incompatible application sch
 are rejected; do not bypass this with an unconditional `alembic stamp`. Concurrent
 upgrades serialize before version inspection and fail on the finite migration lock bound.
 
-Startup validates both application structure and the packaged Alembic head. Missing,
+Startup checks connectivity and the packaged Alembic head; migrations own schema integrity. Missing,
 older or unknown revision state prevents the service from serving requests; run the
 approved upgrade first. Migration execution never occurs inside a payment handler.
 
@@ -129,8 +129,8 @@ process environment, which takes precedence over the literal local file. Unknown
 levels, invalid numeric fields and inconsistent budgets fail safely before serving.
 `PAYMENTS_LOG_LEVEL` accepts DEBUG, INFO (default), WARNING, ERROR or CRITICAL.
 
-`PAYMENTS_POOL_MAX` is the combined per-process connection maximum, divided between two
-physical pools. `PAYMENTS_IDEMPOTENCY_POOL_MAX` (default1) assigns the lifecycle pool's
-share; the business pool receives the remainder, and both require capacity. The minimum
-and queued-acquisition bound are shared across the allocation. Include every process and
-maintenance command in the deployment connection budget; this split does not double it.
+`PAYMENTS_POOL_MAX` bounds one pool per process, serving successive lifecycle and
+business transactions. Physical connections may be reused; no lifecycle partition setting
+is required. Native queue limits apply to every checkout. Include every process and
+maintenance command in the deployment connection budget. Startup does not detect manual
+schema drift with an unchanged Alembic revision; manage schema through migrations.

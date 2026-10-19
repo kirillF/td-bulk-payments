@@ -33,7 +33,6 @@ BUDGET_FIELDS = frozenset(
     }
 )
 INTEGER_FIELDS = BUDGET_FIELDS | {
-    "idempotency_pool_max",
     "telemetry_shutdown_ms",
     "health_probe_budget_ms",
     "otlp_timeout_ms",
@@ -98,9 +97,8 @@ class Settings(BaseSettings):
     db_connection_budget: int = Field(default=8, ge=1)
     max_processes: int = Field(default=2, ge=1)
     pool_min: int = Field(default=1, ge=0)
-    pool_max: int = Field(default=4, ge=2)
+    pool_max: int = Field(default=4, ge=1)
     pool_max_waiting: int = Field(default=4, ge=1)
-    idempotency_pool_max: int = Field(default=1, ge=1)
     acquire_timeout_ms: int = Field(default=1000, ge=1)
     connect_timeout_seconds: int = Field(default=2, ge=1)
     statement_timeout_ms: int = Field(default=3000, ge=1)
@@ -173,8 +171,6 @@ class Settings(BaseSettings):
             or self.max_processes * self.pool_max > self.db_connection_budget
         ):
             raise ValueError("Pool/process counts exceed the declared connection budget")
-        if self.idempotency_pool_max >= self.pool_max:
-            raise ValueError("Lifecycle and business pools both require capacity")
         if not self.lock_timeout_ms < self.statement_timeout_ms < self.transaction_timeout_ms:
             raise ValueError("Require lock < statement < transaction timeouts")
         if self.idle_transaction_timeout_ms >= self.transaction_timeout_ms:

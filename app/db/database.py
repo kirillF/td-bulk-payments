@@ -2,16 +2,16 @@
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Generator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 import psycopg
 from psycopg import AsyncConnection, IsolationLevel
 from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow, dict_row
-from psycopg_pool import AsyncConnectionPool, TooManyRequests
+from psycopg_pool import AsyncConnectionPool
 from psycopg_pool.pool_async import ReturnConnection
 
 from app.core.config import Settings
@@ -25,30 +25,11 @@ class Operation:
     returning: bool = False
 
 
-@dataclass
-class AcquisitionBudget:
-    """Shared pending acquisitions across the two pools on one application event loop."""
-
-    maximum: int
-    pending: int = 0
-
-
 class Pool(AsyncConnectionPool[AsyncConnection[DictRow]]):
     settings: Settings
     active_operations: set[asyncio.Task[Any]]
-    admission: AcquisitionBudget
-    peers: tuple[Pool, ...]
 
     async def getconn(self, timeout: float | None = None) -> AsyncConnection[DictRow]:
-        if self.admission.pending >= self.admission.maximum:
-            raise TooManyRequests("Shared acquisition queue is full")
-        self.admission.pending += 1
-        try:
-            return await self._get_admitted(timeout)
-        finally:
-            self.admission.pending -= 1
-
-    async def _get_admitted(self, timeout: float | None) -> AsyncConnection[DictRow]:
         try:
             return await super().getconn(timeout=timeout)
         except BaseException:
@@ -62,13 +43,6 @@ class Pool(AsyncConnectionPool[AsyncConnection[DictRow]]):
                     position for position in self._waiting if position.error is None
                 )
             raise
-
-    def aggregate_stats(self) -> dict[str, int]:
-        statistics = [pool.get_stats() for pool in self.peers]
-        return {
-            "pool_size": sum(value.get("pool_size", 0) for value in statistics),
-            "requests_waiting": sum(value.get("requests_waiting", 0) for value in statistics),
-        }
 
     async def return_owned(self, connection: AsyncConnection[DictRow], owner: Operation) -> None:
         """Transfer ownership to pool maintenance without a cancellable handoff gap.
@@ -173,12 +147,7 @@ async def run_owned[T](
         pool.active_operations.discard(task)
 
 
-def create_pool(
-    configuration: Settings | str,
-    *,
-    role: Literal["business", "lifecycle"] = "business",
-    admission: AcquisitionBudget | None = None,
-) -> Pool:
+def create_pool(configuration: Settings | str) -> Pool:
     settings = Settings.local(configuration) if isinstance(configuration, str) else configuration
 
     async def configure(connection: AsyncConnection[DictRow]) -> None:
@@ -193,20 +162,17 @@ def create_pool(
             "transaction_timeout": settings.transaction_timeout_ms,
         }.items()
     )
-    lifecycle_min = min(settings.pool_min, settings.idempotency_pool_max)
     pool = Pool(
         settings.database_url,
         connection_class=AsyncConnection[DictRow],
         kwargs={
             "row_factory": dict_row,
             "connect_timeout": settings.connect_timeout_seconds,
-            "application_name": "firm-payments-" + role,
+            "application_name": "firm-payments",
             "options": options,
         },
-        min_size=lifecycle_min if role == "lifecycle" else settings.pool_min - lifecycle_min,
-        max_size=settings.idempotency_pool_max
-        if role == "lifecycle"
-        else settings.pool_max - settings.idempotency_pool_max,
+        min_size=settings.pool_min,
+        max_size=settings.pool_max,
         max_waiting=settings.pool_max_waiting,
         timeout=settings.acquire_timeout_ms / 1000,
         reconnect_timeout=settings.connect_timeout_seconds,
@@ -215,222 +181,7 @@ def create_pool(
     )
     pool.active_operations = set()
     pool.settings = settings
-    pool.admission = admission or AcquisitionBudget(settings.pool_max_waiting)
-    pool.peers = (pool,)
     return pool
-
-
-def schema_validation(
-    lifecycle: bool = False,
-) -> Generator[tuple[str, tuple[object, ...]], list[DictRow]]:
-    """One structural oracle shared by async startup and sync migration adoption."""
-    columns = {
-        "firms": {
-            "id": ("integer", True),
-            "name": ("text", True),
-            "balance_cents": ("integer", True),
-            "uuid": ("text", True),
-        },
-        "payments": {
-            "id": ("integer", True),
-            "payer_firm_id": ("integer", True),
-            "payee_firm_id": ("integer", True),
-            "amount_cents": ("integer", True),
-            "description": ("text", True),
-        },
-        "bulk_payment_requests": {
-            "payer_firm_uuid": ("text", True),
-            "idempotency_key": ("text", True),
-            "request_fingerprint": ("text", True),
-            "status_code": ("integer", False),
-            "response_body": ("jsonb", False),
-            "created_at": ("timestamp with time zone", True),
-        },
-    }
-    constraints = {
-        "firms": {
-            "PRIMARY KEY (id)",
-            "CHECK (balance_cents >= 0)",
-            "CHECK (uuid::uuid::text = uuid)",
-        },
-        "payments": {
-            "PRIMARY KEY (id)",
-            "CHECK (amount_cents > 0)",
-            "CHECK (payer_firm_id <> payee_firm_id)",
-            "FOREIGN KEY (payer_firm_id) REFERENCES firms(id)",
-            "FOREIGN KEY (payee_firm_id) REFERENCES firms(id)",
-        },
-        "bulk_payment_requests": {
-            "PRIMARY KEY (payer_firm_uuid,idempotency_key)",
-            "CHECK (length(idempotency_key) >= 1 AND length(idempotency_key) <= 128)",
-            "CHECK (length(request_fingerprint) = 64)",
-            "CHECK (status_code = ANY ARRAY[201,422])",
-            "CHECK (status_code IS NULL = response_body IS NULL)",
-        },
-    }
-
-    if lifecycle:
-        columns["bulk_payment_requests"].update(
-            {
-                "state": ("text", True),
-                "generation": ("uuid", True),
-                "owner_token": ("uuid", True),
-                "owner_deadline": ("timestamp with time zone", True),
-                "completed_at": ("timestamp with time zone", False),
-                "expires_at": ("timestamp with time zone", True),
-            }
-        )
-        columns["request_execution_guards"] = {
-            "generation": ("uuid", True),
-            "payer_firm_uuid": ("text", True),
-            "idempotency_key": ("text", True),
-        }
-        columns["request_result_receipts"] = {
-            "generation": ("uuid", True),
-            "owner_token": ("uuid", True),
-            "request_fingerprint": ("text", True),
-            "status_code": ("integer", True),
-            "response_body": ("jsonb", True),
-            "committed_at": ("timestamp with time zone", True),
-        }
-        constraints["bulk_payment_requests"].update(
-            {
-                "UNIQUE (generation)",
-                "UNIQUE (payer_firm_uuid,idempotency_key,generation)",
-                "CHECK (state = ANY ARRAY['processing'::text,'completed'::text])",
-                "CHECK ((state='processing'::text AND status_code IS NULL "
-                "AND response_body IS NULL "
-                "AND completed_at IS NULL) OR (state='completed'::text AND status_code IS NOT NULL "
-                "AND response_body IS NOT NULL AND completed_at IS NOT NULL))",
-            }
-        )
-        constraints["request_execution_guards"] = {
-            "PRIMARY KEY (generation)",
-            "FOREIGN KEY (payer_firm_uuid,idempotency_key,generation) REFERENCES "
-            "bulk_payment_requests(payer_firm_uuid,idempotency_key,generation) ON DELETE CASCADE",
-        }
-        constraints["request_result_receipts"] = {
-            "PRIMARY KEY (generation)",
-            "FOREIGN KEY (generation) REFERENCES request_execution_guards(generation) "
-            "ON DELETE CASCADE",
-            "CHECK (length(request_fingerprint) = 64)",
-            "CHECK (status_code = ANY ARRAY[201,422])",
-        }
-
-    def normalized(value: str) -> str:
-        return "".join(value.split()).replace("(", "").replace(")", "")
-
-    for table, expected in columns.items():
-        rows = yield (
-            "SELECT attname,format_type(atttypid,atttypmod) AS type,attnotnull,attidentity "
-            "FROM pg_attribute WHERE attrelid=%s::regclass AND attnum>0 AND NOT attisdropped",
-            (table,),
-        )
-        if {r["attname"]: (r["type"], r["attnotnull"]) for r in rows} != expected:
-            raise ValueError("Incompatible database columns")
-        if table in {"firms", "payments"} and not any(
-            r["attname"] == "id" and r["attidentity"] == "d" for r in rows
-        ):
-            raise ValueError("Incompatible generated identity")
-        checks = yield (
-            "SELECT pg_get_constraintdef(oid) AS definition,convalidated "
-            "FROM pg_constraint WHERE conrelid=%s::regclass",
-            (table,),
-        )
-        if any(not row["convalidated"] for row in checks) or {
-            normalized(row["definition"]) for row in checks
-        } != {normalized(item) for item in constraints[table]}:
-            raise ValueError("Incompatible database constraints")
-    rows = yield (
-        "SELECT attcollation='pg_catalog.\"C\"'::regcollation AS valid "
-        "FROM pg_attribute WHERE attrelid='bulk_payment_requests'::regclass "
-        "AND attname='idempotency_key' AND NOT attisdropped",
-        (),
-    )
-    if not rows or not rows[0]["valid"]:
-        raise ValueError("Incompatible idempotency key collation")
-    rows = yield (
-        "SELECT i.indisunique AND i.indisvalid AND i.indpred IS NULL AND i.indnkeyatts=1 "
-        "AND i.indrelid='firms'::regclass AND i.indkey[0]=(SELECT attnum FROM pg_attribute "
-        "WHERE attrelid='firms'::regclass AND attname='uuid') AND am.amname='btree' AS valid "
-        "FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
-        "JOIN pg_am am ON am.oid=c.relam WHERE i.indexrelid='firms_uuid_idx'::regclass",
-        (),
-    )
-    if not rows or not rows[0]["valid"]:
-        raise ValueError("Required unique firm UUID index missing")
-    for table in ("firms", "payments"):
-        rows = yield ("SELECT pg_get_serial_sequence(%s,'id') AS sequence", (table,))
-        if not rows or not rows[0]["sequence"]:
-            raise ValueError("Generated identity sequence missing")
-    rows = yield (
-        "SELECT pg_get_expr(d.adbin,d.adrelid) AS expression FROM pg_attrdef d "
-        "JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum "
-        "WHERE a.attrelid='bulk_payment_requests'::regclass AND a.attname='created_at'",
-        (),
-    )
-    if len(rows) != 1 or rows[0]["expression"] != "now()":
-        raise ValueError("Incompatible request timestamp default")
-
-    if lifecycle:
-        for index, column, predicate in [
-            ("request_expiry_idx", "expires_at", None),
-            ("request_processing_deadline_idx", "owner_deadline", "state='processing'::text"),
-        ]:
-            rows = yield (
-                "SELECT i.indisvalid AND NOT i.indisunique AND i.indnkeyatts=1 "
-                "AND i.indrelid='bulk_payment_requests'::regclass AND i.indkey[0]="
-                "(SELECT attnum FROM pg_attribute WHERE attrelid=i.indrelid AND attname=%s) "
-                "AND am.amname='btree' AS valid,pg_get_expr(i.indpred,i.indrelid) AS predicate "
-                "FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
-                "JOIN pg_am am ON am.oid=c.relam WHERE i.indexrelid=%s::regclass",
-                (column, index),
-            )
-            if (
-                not rows
-                or not rows[0]["valid"]
-                or (normalized(rows[0]["predicate"] or "") != normalized(predicate or ""))
-            ):
-                raise ValueError("Required request lifecycle index missing")
-        rows = yield (
-            "SELECT attcollation='pg_catalog.\"C\"'::regcollation AS valid "
-            "FROM pg_attribute WHERE attrelid='request_execution_guards'::regclass "
-            "AND attname='idempotency_key' AND NOT attisdropped",
-            (),
-        )
-        if not rows or not rows[0]["valid"]:
-            raise ValueError("Incompatible guard key collation")
-        rows = yield (
-            "SELECT a.attname,pg_get_expr(d.adbin,d.adrelid) AS expression "
-            "FROM pg_attribute a LEFT JOIN pg_attrdef d "
-            "ON a.attrelid=d.adrelid AND a.attnum=d.adnum "
-            "WHERE a.attrelid='bulk_payment_requests'::regclass "
-            "AND a.attname IN ('state','generation','owner_token','owner_deadline',"
-            "'completed_at','expires_at') AND NOT a.attisdropped",
-            (),
-        )
-        if len(rows) != 6 or any(row["expression"] is not None for row in rows):
-            raise ValueError("Incompatible lifecycle defaults")
-        rows = yield (
-            "SELECT pg_get_expr(d.adbin,d.adrelid) AS expression FROM pg_attrdef d "
-            "JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum "
-            "WHERE a.attrelid='request_result_receipts'::regclass AND a.attname='committed_at'",
-            (),
-        )
-        if len(rows) != 1 or rows[0]["expression"] != "now()":
-            raise ValueError("Incompatible receipt timestamp default")
-
-
-async def validate_schema(connection: AsyncConnection[DictRow]) -> None:
-    await validate_revision(connection)
-    checks = schema_validation(lifecycle=True)
-    query = next(checks)
-    while True:
-        rows = await (await connection.execute(*query)).fetchall()
-        try:
-            query = checks.send(rows)
-        except StopIteration:
-            break
 
 
 async def validate_revision(connection: AsyncConnection[DictRow]) -> None:
@@ -451,26 +202,13 @@ async def validate_revision(connection: AsyncConnection[DictRow]) -> None:
         raise ValueError("Unsupported database revision; run migrations before startup")
 
 
-def validate_schema_sync(
-    connection: psycopg.Connection[Any], *, lifecycle: bool | None = None
-) -> None:
-    if lifecycle is None:
-        with connection.cursor() as detector:
-            detected = detector.execute(
-                "SELECT to_regclass('request_execution_guards') IS NOT NULL"
-            ).fetchone()
-            if detected is None:
-                raise ValueError("Cannot determine schema generation")
-            lifecycle = bool(detected[0])
-    checks = schema_validation(lifecycle=lifecycle)
-    query = next(checks)
-    with connection.cursor(row_factory=dict_row) as cursor:
-        while True:
-            rows = cursor.execute(*query).fetchall()
-            try:
-                query = checks.send(rows)
-            except StopIteration:
-                return
+def validate_schema_sync(connection: psycopg.Connection[Any], *, lifecycle: bool = False) -> None:
+    """Compatibility entry point for immutable revisions adopting the legacy schema."""
+    from migrations.legacy_schema import validate_legacy_schema
+
+    if lifecycle:
+        raise ValueError("Current schema integrity is owned by Alembic migrations")
+    validate_legacy_schema(connection)
 
 
 class CommitUncertain(psycopg.OperationalError):
