@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:17
+    image: postgres:17@sha256:67f41722b7a8cbdb868a44a4995c846eddfdc2973bccb291ce937dce88ad5675
     environment:
       POSTGRES_USER: firm_payments
       POSTGRES_PASSWORD: local_only
@@ -14,14 +14,26 @@ services:
       interval: 2s
       timeout: 3s
       retries: 20
+  migrate:
+    build: .
+    command: ["/app/.venv/bin/python", "-m", "app.db.migrate"]
+    environment:
+      PAYMENTS_PROFILE: local
+      DATABASE_URL: postgresql://firm_payments:local_only@postgres:5432/firm_payments
+    depends_on:
+      postgres:
+        condition: service_healthy
   service:
     build: .
     ports:
       - "127.0.0.1:8000:8000"
     environment:
+      PAYMENTS_PROFILE: local
       DATABASE_URL: postgresql://firm_payments:local_only@postgres:5432/firm_payments
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 volumes:
   postgres_data:

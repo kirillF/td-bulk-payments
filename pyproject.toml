@@ -6,8 +6,14 @@ requires-python = ">=3.15,<3.16"
 dependencies = [
     "fastapi>=0.115,<1",
     "pydantic>=2.10,<3",
+    "python-dotenv==1.2.4",
     "psycopg[binary,pool]>=3.2,<4",
     "uvicorn>=0.34,<1",
+    "prometheus-client>=0.21,<1",
+    "opentelemetry-sdk>=1.30,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
+    "alembic>=1.16,<2",
+    "sqlalchemy>=2.0,<2.1",
 ]
 
 [dependency-groups]
@@ -33,9 +39,10 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.mypy]
 python_version = "3.15"
 strict = true
-files = ["firm_payments", "scripts"]
+files = ["app", "migrations", "scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
-markers = ["integration: requires a Docker daemon and real PostgreSQL"]
+pythonpath = ["."]
+markers = ["integration: requires a Docker daemon and real PostgreSQL", "scenario: approved scenario identifier"]

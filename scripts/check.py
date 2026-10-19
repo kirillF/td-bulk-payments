@@ -1,18 +1,26 @@
-"""Run deterministic foundation checks from the repository root."""
+"""Run currently delivered source/container checks; later slices extend this list."""
 
 import subprocess
 import sys
 
 
 def main() -> None:
-    commands = [
-        ["uv", "lock", "--check"],
-        [sys.executable, "-m", "ruff", "format", "--check", "."],
-        [sys.executable, "-m", "ruff", "check", "."],
-        [sys.executable, "-m", "mypy"],
-    ]
-    for command in commands:
-        subprocess.run(command, check=True, timeout=120)
+    for group in [
+        "baseline-syntax",
+        "quality",
+        "money-unit",
+        "atomic-api",
+        "uuid-index",
+        "idempotency",
+        "contention",
+        "resource-failures",
+        "observability",
+        "container-boot",
+        "container-http",
+    ]:
+        subprocess.run(
+            [sys.executable, "scripts/harness_checks.py", group], check=True, timeout=300
+        )
 
 
 if __name__ == "__main__":

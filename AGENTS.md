@@ -6,6 +6,12 @@
 - Stack/tooling: `docs/harness/FOUNDATION.md`.
 - Gated work, commands and coordinator loop: `docs/harness/README.md` and `docs/harness/OPERATIONAL_CONTRACT.md`.
 
+## Project-specific execution authority
+
+For QUAL-1, setup, Docker/Testcontainers checks, slice execution and delivery/review gates,
+read `docs/harness/PROJECT_OVERRIDES.md` first. Its audited project-local execution policy
+supersedes the common native-isolation/worker transport only for this repository.
+
 ## Working rules
 
 - Commits: follow `docs/harness/COMMIT_POLICY.md` when staging or checkpointing project work.

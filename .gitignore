@@ -222,3 +222,10 @@ __marimo__/
 # Firm Payments tooling
 .uv-cache/
 .DS_Store
+
+# Project-owned managed Python runtime
+.uv-python/
+
+# Local dotenv values; publish only the illustrative template.
+.env.*
+!.env.example
