@@ -64,18 +64,18 @@ class BulkPayment(BaseModel):
 class PaymentCreated(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    id: int = Field(gt=0)
+    id: int = Field(gt=0, strict=True)
     payer_firm_uuid: UUID
     payee_firm_uuid: UUID
-    amount_cents: int = Field(gt=0, le=MAX_CENTS)
+    amount_cents: int = Field(gt=0, le=MAX_CENTS, strict=True)
     description: str
 
 
 class BulkPaymentResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    payments_created: int = Field(gt=0)
-    total_amount_cents: int = Field(gt=0)
+    payments_created: int = Field(gt=0, strict=True)
+    total_amount_cents: int = Field(gt=0, strict=True)
     payments: list[PaymentCreated]
 
     @model_validator(mode="after")

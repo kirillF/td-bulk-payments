@@ -72,3 +72,52 @@ def test_fingerprint_preserves_payment_order():
     first = BulkPayment.model_validate(body)
     body["payments"].reverse()
     assert first.fingerprint() != BulkPayment.model_validate(body).fingerprint()
+
+
+DURABLE_FIELDS = ["payments_created", "total_amount_cents", "id", "amount_cents"]
+DURABLE_TYPES = ["boolean", "string", "float"]
+
+
+def corrupt_durable_integer(field, kind, body=None):
+    import copy
+
+    result = (
+        copy.deepcopy(body)
+        if body is not None
+        else {
+            "payments_created": 1,
+            "total_amount_cents": 100,
+            "payments": [
+                {
+                    "id": 1,
+                    "payer_firm_uuid": PAYER,
+                    "payee_firm_uuid": PAYEE,
+                    "amount_cents": 100,
+                    "description": "synthetic durable result",
+                }
+            ],
+        }
+    )
+    target = (
+        result if field in {"payments_created", "total_amount_cents"} else result["payments"][0]
+    )
+    value = target[field]
+    target[field] = {"boolean": True, "string": str(value), "float": float(value)}[kind]
+    return result
+
+
+@pytest.mark.parametrize("field", DURABLE_FIELDS)
+@pytest.mark.parametrize("kind", DURABLE_TYPES)
+def test_durable_response_rejects_coercible_integer_types(field, kind):
+    from app.schemas.idempotency import StoredResultInvalid, validate_result
+
+    with pytest.raises(StoredResultInvalid):
+        validate_result(201, corrupt_durable_integer(field, kind))
+
+
+def test_durable_response_accepts_json_integers_and_uuid_strings():
+    from app.schemas.idempotency import validate_result
+
+    body = corrupt_durable_integer("payments_created", "string")
+    body["payments_created"] = 1
+    assert validate_result(201, body) == body

@@ -9,6 +9,7 @@ import pytest
 from app.schemas.payments import BulkPayment
 
 from .conftest import OTHER, PAYEE, PAYER, balances, count, payload, post
+from .test_models import DURABLE_FIELDS, DURABLE_TYPES, corrupt_durable_integer
 
 
 def test_normalized_replay_preserves_full_ids(application, seeded_database):
@@ -720,3 +721,33 @@ def test_maintenance_deadline_rolls_back_slow_lifecycle_changes(application, see
             connection.execute(
                 "DROP TRIGGER delay_expiry ON bulk_payment_requests; DROP FUNCTION delay_expiry()"
             )
+
+
+@pytest.mark.parametrize("field", DURABLE_FIELDS)
+@pytest.mark.parametrize("kind", DURABLE_TYPES)
+def test_cache_only_numeric_corruption_cannot_match_receipt(
+    application, seeded_database, field, kind
+):
+    from psycopg.types.json import Jsonb
+
+    first = post(application, payload("1"), "numeric-corruption")
+    assert first.status_code == 201
+    original_balances = balances(seeded_database)
+    corrupted = corrupt_durable_integer(field, kind, first.json())
+    with psycopg.connect(seeded_database) as connection:
+        before_receipts = connection.execute("SELECT * FROM request_result_receipts").fetchall()
+        connection.execute(
+            "UPDATE bulk_payment_requests SET response_body=%s WHERE idempotency_key=%s",
+            (Jsonb(corrupted), "numeric-corruption"),
+        )
+        before_entry = connection.execute("SELECT * FROM bulk_payment_requests").fetchall()
+    replay = post(application, payload("1"), "numeric-corruption")
+    assert replay.status_code == 503 and replay.json() == {"detail": "service_unavailable"}
+    assert balances(seeded_database) == original_balances
+    assert count(seeded_database, "payments") == 1
+    with psycopg.connect(seeded_database) as connection:
+        assert (
+            connection.execute("SELECT * FROM request_result_receipts").fetchall()
+            == before_receipts
+        )
+        assert connection.execute("SELECT * FROM bulk_payment_requests").fetchall() == before_entry

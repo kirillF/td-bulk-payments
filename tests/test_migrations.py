@@ -15,6 +15,8 @@ from psycopg import sql
 
 from app.db.migrate import migrate, migration_config
 
+from .test_models import DURABLE_FIELDS, DURABLE_TYPES, corrupt_durable_integer
+
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.integration
 
@@ -910,3 +912,11 @@ def legacy_rows(snapshot):
         name: [row[:6] if name == "bulk_payment_requests" else row for row in rows]
         for name, rows in snapshot["rows"].items()
     }
+
+
+@pytest.mark.parametrize("field", DURABLE_FIELDS)
+@pytest.mark.parametrize("kind", DURABLE_TYPES)
+def test_lifecycle_rejects_coercible_legacy_integer_types(database_url, field, kind):
+    test_lifecycle_rejects_invalid_legacy_without_changes(
+        database_url, 201, corrupt_durable_integer(field, kind)
+    )
