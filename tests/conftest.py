@@ -36,7 +36,10 @@ def database_url(postgres_container: Any) -> str:
 @pytest.fixture
 def seeded_database(database_url: str) -> str:
     with psycopg.connect(database_url) as connection:
-        connection.execute("TRUNCATE payments, bulk_payment_requests, firms RESTART IDENTITY")
+        connection.execute(
+            "TRUNCATE request_result_receipts,request_execution_guards,payments,"
+            "bulk_payment_requests,firms RESTART IDENTITY"
+        )
         with connection.cursor() as cursor:
             cursor.executemany(
                 "INSERT INTO firms (name, uuid, balance_cents) VALUES (%s, %s, %s)",

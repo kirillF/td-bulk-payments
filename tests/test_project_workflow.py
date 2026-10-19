@@ -103,6 +103,35 @@ def test_feature_requires_separate_approval(tmp_path):
         workflow.feature_authority(payload)
 
 
+def test_current_lifecycle_and_standards_authority_authenticate():
+    payload = workflow.STORE / (
+        "005ccfc32a37f8f1ccdcc43b9f4bce6c8c5e5c21897baa97e7950d15023f34ed.payload.json"
+    )
+    assert workflow.feature_authority(payload)["scope_id"] == "bulk-payments"
+
+
+def test_lifecycle_rejects_wrong_preimage_and_standards_binding():
+    payload = workflow.STORE / (
+        "005ccfc32a37f8f1ccdcc43b9f4bce6c8c5e5c21897baa97e7950d15023f34ed.payload.json"
+    )
+    feature = json.loads(payload.read_text())
+    prior = {
+        str(Path(name).relative_to(workflow.ROOT)): binding["preimage_sha256"]
+        for name, binding in json.loads(
+            (
+                workflow.STATE / "correlation-settings-aligned-amendment/design-postimages.json"
+            ).read_text()
+        ).items()
+    }
+    wrong = dict(prior)
+    wrong["docs/features/bulk-payments/api.md"] = "wrong-prior"
+    with pytest.raises(ValueError, match="does not extend"):
+        workflow.lifecycle_design_overrides(feature, wrong)
+    feature["artifacts"]["CODING_STANDARDS.md"] = "wrong-original"
+    with pytest.raises(ValueError, match="Standards amendment"):
+        workflow.lifecycle_design_overrides(feature, prior)
+
+
 def test_description_amendment_checks_exact_postimages_and_original_chain(tmp_path, monkeypatch):
     directory = tmp_path / ".harness/project-local-workflow/description-sanitization-amendment"
     directory.mkdir(parents=True)

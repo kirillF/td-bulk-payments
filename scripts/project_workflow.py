@@ -235,6 +235,14 @@ def check(group: str) -> Path:
         state = json.loads((STATE / "feature-state.json").read_text())
         authority = feature_authority(Path(state["payload"]))
         task = state["current_task"]
+        if state.get("status") == "LIFECYCLE_IMPLEMENTING":
+            if state.get("lifecycle_approval_sha256") != LIFECYCLE_AMENDMENT:
+                raise ValueError("Unknown lifecycle authority")
+            contract = json.loads((ROOT / "docs/features/bulk-payments/feature.json").read_text())
+            tasks = {entry["id"]: entry for entry in contract["task_definitions"]}
+            if task not in tasks:
+                raise ValueError("Unknown lifecycle task")
+            authority = dict(authority, tasks=tasks)
         if state.get("status") == "ALEMBIC_IMPLEMENTING":
             if state.get("aligned_alembic_approval_sha256") != ALIGNED_ALEMBIC_AMENDMENT:
                 raise ValueError("Unknown aligned Alembic attempt")
@@ -554,6 +562,78 @@ def aligned_alembic_overrides(feature: dict[str, Any], prior: dict[str, str]) ->
     return result
 
 
+LIFECYCLE_AMENDMENT = "beb372ab543562b93fe9bffa3d7a951f5f5ffafba5a992240d55a44557cf6053"
+STANDARDS_AMENDMENT = "12bf57961f7363d83f3e45ec5e3698cbc9ea6587fce3757cac5fd45454122bc9"
+
+
+def lifecycle_design_overrides(feature: dict[str, Any], prior: dict[str, str]) -> dict[str, str]:
+    """Authenticate new postimages and the exact one-file standards baseline advance."""
+    amended = approval(
+        STORE / f"{LIFECYCLE_AMENDMENT}.payload.json",
+        {
+            "purpose": "project-local-correlation-lifecycle-implementation-v1",
+            "project": str(ROOT),
+            "scope_id": "bulk-payments",
+            "gate": "aligned-correlation-lifecycle-contract-and-implementation",
+            "parent_alembic_approval_sha256": ALIGNED_ALEMBIC_AMENDMENT,
+        },
+    )
+    standards = approval(
+        STORE / f"{STANDARDS_AMENDMENT}.payload.json",
+        {
+            "purpose": "project-local-standards-baseline-amendment-v1",
+            "project": str(ROOT),
+            "scope_id": "bulk-payments",
+            "parent_implementation_approval_sha256": LIFECYCLE_AMENDMENT,
+        },
+    )
+    design = approval(
+        STORE / f"{amended['parent_design_approval_sha256']}.payload.json",
+        {
+            "purpose": "project-local-correlation-idempotency-design-acceptance-v1",
+            "project": str(ROOT),
+            "scope_id": "bulk-payments",
+        },
+    )
+    for authority in (amended, standards, design):
+        for name, expected in authority["artifacts"].items():
+            path = Path(name)
+            if path.is_symlink() or ROOT not in path.resolve().parents:
+                raise ValueError("Lifecycle artifact escapes project")
+            if digest(path.read_bytes()) != expected:
+                raise ValueError("Approved lifecycle artifact changed")
+    directory = STATE / "correlation-settings-aligned-amendment"
+    changes_path = directory / "design-postimages.json"
+    if str(changes_path) not in amended["artifacts"]:
+        raise ValueError("Unbound lifecycle index")
+    changes = json.loads(changes_path.read_text())
+    if set(changes) != {str(ROOT / name) for name in prior if name.startswith("docs/")}:
+        raise ValueError("Unexpected lifecycle postimage paths")
+    result = dict(prior)
+    for name, binding in changes.items():
+        relative = str(Path(name).relative_to(ROOT))
+        if binding["preimage_sha256"] != prior.get(relative, feature["artifacts"].get(relative)):
+            raise ValueError("Lifecycle amendment does not extend approved chain")
+        if amended["artifacts"].get(binding["postimage"]) != binding["postimage_sha256"]:
+            raise ValueError("Unbound lifecycle postimage")
+        result[relative] = binding["postimage_sha256"]
+    change = standards["change"]
+    if change["path"] != "CODING_STANDARDS.md" or change["preimage_sha256"] != feature[
+        "artifacts"
+    ].get("CODING_STANDARDS.md"):
+        raise ValueError("Standards amendment does not extend original authority")
+    old = json.loads((directory / "source-baseline.json").read_text())["source_manifest"]
+    new = json.loads((STATE / "standards-baseline-amendment/source-baseline.json").read_text())[
+        "source_manifest"
+    ]
+    if {name for name in old.keys() | new.keys() if old.get(name) != new.get(name)} != {
+        "CODING_STANDARDS.md"
+    } or new["CODING_STANDARDS.md"] != change["postimage_sha256"] + ":" + change["mode"]:
+        raise ValueError("Standards baseline contains unauthorized drift")
+    result["CODING_STANDARDS.md"] = change["postimage_sha256"]
+    return result
+
+
 def feature_authority(payload: Path) -> dict[str, Any]:
     policy()
     value = approval(
@@ -569,6 +649,7 @@ def feature_authority(payload: Path) -> dict[str, Any]:
     overrides = async_design_overrides(value, digest(payload.read_bytes()), overrides)
     overrides = versioned_design_overrides(value, overrides)
     overrides = aligned_alembic_overrides(value, overrides)
+    overrides = lifecycle_design_overrides(value, overrides)
     for name, original in value["artifacts"].items():
         expected = overrides.get(name, original)
         path = ROOT / name

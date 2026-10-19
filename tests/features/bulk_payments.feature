@@ -1,5 +1,6 @@
 Feature: Atomic and idempotent bulk settlement between firms
   All amounts and balances below are US cents unless dollars are explicitly stated.
+  Existing replay scenarios occur before completed TTL expiry unless stated otherwise.
 
   Background:
     Given firms A, B and C exist with unique canonical UUIDs
@@ -118,8 +119,8 @@ Feature: Atomic and idempotent bulk settlement between firms
   Scenario: Concurrent identical retries across instances
     Given A has 10000 cents
     When overlapping identical requests through independent instances pay B 3000 cents under key K
-    Then all responses replay the same 201 result
-    And all returned payment lists contain the same single persisted payment ID
+    Then one admitted request returns 201 and duplicates observing processing return 409
+    And identical retries after completed publication replay the same 201 result and persisted payment ID
     And balances of A, B and C are 7000, 3000 and 0 cents
     And exactly 1 payment is persisted
 
@@ -145,7 +146,8 @@ Feature: Atomic and idempotent bulk settlement between firms
     Given an injected database failure occurs while inserting a payment
     When A submits a valid affordable batch under key K
     Then the response is 503 with Retry-After 1
-    And no payments, balance changes or completed key K remain
+    And no payments, balance changes or committed result receipt remain
+    And bounded cleanup or reconciliation releases the abandoned claim before retry
     When the failure is removed and the batch is retried under key K
     Then exactly one successful batch is committed with response 201
 
@@ -154,7 +156,8 @@ Feature: Atomic and idempotent bulk settlement between firms
     Given another transaction holds a required firm lock beyond the configured lock timeout
     When A submits a valid affordable batch under key K
     Then the response is 503 with Retry-After 1
-    And no payments, balance changes or key K reservation remain
+    And no payments, balance changes or committed result receipt remain
+    And bounded cleanup or reconciliation releases the abandoned claim before retry
     When the lock is released and the same batch is retried under key K
     Then exactly one successful batch is committed with response 201
 
@@ -162,7 +165,8 @@ Feature: Atomic and idempotent bulk settlement between firms
   Scenario: Recover after losing the successful HTTP response
     Given A's batch under key K committed but its HTTP response was lost
     When the caller retries the identical batch under key K
-    Then the original 201 result is replayed
+    Then bounded reconciliation publishes the committed receipt if necessary
+    And the original 201 result is replayed after any temporary processing 409
     And only the original batch's payment and balance effects exist
 
   @SC-17
@@ -401,3 +405,181 @@ Feature: Atomic and idempotent bulk settlement between firms
       | missing  |
       | older    |
       | unknown  |
+
+  @SC-39
+  Scenario: Preserve a caller correlation token through the operation
+    Given a valid payment request with one X-Correlation-ID header "firm-job_2026.10"
+    When the request completes
+    Then its response echoes that correlation ID and a fresh X-Request-ID
+    And controller, service and storage events share the effective correlation and request IDs
+
+  @SC-40
+  Scenario Outline: Generate safe metadata for absent or malformed correlation headers
+    Given correlation metadata is <metadata>
+    When an application HTTP request returns <status>
+    Then exactly one safe generated correlation ID is returned
+    And raw invalid metadata is absent from logs and responses
+    And the payment validation and execution decision is unaffected by correlation replacement
+    Examples:
+      | metadata              | status |
+      | absent                | 201    |
+      | empty                 | 422    |
+      | invalid characters    | 409    |
+      | oversized             | 503    |
+      | duplicate headers     | 404    |
+      | comma-combined values | 500    |
+    # Also exercise each metadata form independently of status; test data is not an SLA.
+
+  @SC-41
+  Scenario: Replay is independent of diagnostic metadata
+    Given a payment committed under a key with correlation ID "attempt-one"
+    When the same normalized request and key use correlation ID "attempt-two"
+    Then the original status, payment list and IDs are replayed without new monetary effects
+    And the response and logs use "attempt-two" and a fresh request ID
+
+  @SC-42
+  Scenario: INFO provides operational request visibility
+    Given the log level is INFO and the sink is healthy
+    When requests complete with success, rejection, conflict and infrastructure failure
+    Then each application request has one arrival and one completion event with status and outcome
+    And infrastructure errors have a classified warning or error without duplicated exception reports
+    And routine processing-stage events are suppressed
+
+  @SC-43
+  Scenario: DEBUG follows each meaningful stage without financial payloads
+    Given the log level is DEBUG and the sink is healthy
+    When a batch executes through controller, idempotency, locks, planning, writes and commit
+    Then structured start and finish or failure events identify each processing stage and storage operation
+    And per-payment insertion events identify only progress ordinal rather than financial identifiers
+    And all levels exclude financial payloads, credentials, SQL parameters and raw exception text
+    And an attempted write is not reported as committed before commit acknowledgement
+
+  @SC-44
+  Scenario: Context remains isolated through failures and cancellation
+    Given overlapping requests on independent app instances include distinct correlation IDs
+    When one times out, one is cancelled and others complete
+    Then their handler, service, storage and cleanup events retain their own request context
+    And context is reset before subsequent requests and background lifecycle events
+    And unknown-commit and rollback failures retain truthful safe classifications
+
+  @SC-45
+  Scenario: Typed configuration preserves deliberate sources
+    Given conflicting values in explicit configuration, process environment and literal dotenv
+    When normal settings are loaded
+    Then explicit configuration precedes environment, which precedes dotenv and permitted defaults
+    And configured-profile budgets remain required and secrets are never logged
+    When settings are constructed from an explicit test mapping
+    Then ambient environment and dotenv cannot supply missing values or override the mapping
+
+  @SC-46
+  Scenario Outline: Reject invalid configuration before serving traffic
+    Given configuration contains <problem>
+    When the service starts
+    Then startup fails with a safe diagnostic and no financial changes
+    Examples:
+      | problem                              |
+      | unsupported log level                |
+      | missing configured deployment budget |
+      | inconsistent database timeout bounds |
+      | invalid queue bound or sample ratio  |
+    # Valid INFO/DEBUG and higher thresholds must also demonstrate actual filtering.
+
+  @SC-47
+  Scenario: Degraded logging cannot decide payments
+    Given a slow or failing log sink and a saturated bounded queue
+    When payment requests execute with verbose logging
+    Then monetary and idempotency invariants remain intact within existing operation budgets
+    And requests do not wait for the external sink
+    And telemetry drop signals expose loss without recursive failure logging
+
+  @SC-48
+  Scenario: Middleware admits new requests and short-circuits known entries
+    Given a validated normalized request and idempotency key
+    When middleware resolves the request entry using connection A
+    Then a new entry is committed with status processing before controller admission
+    And a matching completed entry returns its cached status and body without invoking the controller
+    And a matching processing entry returns 409 request_processing without invoking the controller
+    And a different fingerprint returns 409 idempotency_key_conflict
+    And neither the lightweight checker nor the payment service calls the other
+
+  @SC-49
+  Scenario: Overlapping requests observe processing without repeating business work
+    Given independent app instances receive the same key and normalized request
+    When one commits its processing claim on A and performs financial work on B
+    Then competing requests observe actual database coordination and return 409 while it is processing
+    And exactly one business execution commits with an atomic result receipt
+    And subsequent requests replay the completed response after publication on A
+    And no request holds a connection A transaction while waiting for connection B
+
+  @SC-50
+  Scenario: Corrupt cached responses cannot authorize financial execution
+    Given a completed request entry has a corrupt cached response
+    When middleware resolves the same request
+    Then it returns a safe infrastructure failure instead of invoking payment execution
+    And no monetary effects occur
+
+  @SC-51
+  Scenario: Expired completed keys have an explicit reuse boundary
+    Given a completed response is retained for 24 hours from completion using database time
+    When an identical request arrives before expiry
+    Then the original response is replayed
+    When a request arrives at or after expiry and the old generation is safely resolved
+    Then an atomic fresh generation may execute a new payment
+    And bounded cleanup does not delete unresolved guards or receipts
+
+  @SC-52
+  Scenario: Recover a commit before completed publication
+    Given B committed financial changes and its result receipt
+    And the process crashed before A published completed
+    When a retry or reconciler resolves the processing entry
+    Then the committed receipt is published and replayed without executing payments again
+    And a temporary unresolved processing state returns 409
+    And a publication failure does not claim that financial changes rolled back
+
+  @SC-53
+  Scenario: Recover an abandoned claim without allowing stale ownership
+    Given A committed processing but its owner crashed before B committed
+    When recovery acquires the execution guard and establishes no committed receipt
+    Then it fences the old owner before admitting a replacement execution
+    And an old owner that resumes cannot execute or finalize the new generation
+    And failure of result-receipt recording rolls back financial effects on B
+
+  @SC-54
+  Scenario: TTL and failures cannot bypass an active or uncertain business transaction
+    Given a processing entry reaches its 24-hour expiry with an active or uncertain B transaction
+    When cleanup and duplicate requests race with recovery and the old owner
+    Then they cannot delete the execution guard or authorize a second financial execution
+    And processing returns 409 until bounded reconciliation establishes the result
+    And exhausted database budgets return the existing safe 503 without hidden retries
+    And correlation and sanitized logs distinguish claim, execution, publication and recovery
+
+  @SC-55
+  Scenario: Migrate existing completed keys with a full retention window
+    Given the old supported schema contains committed success and business-rejection results
+    When the lifecycle revision upgrades at one database cutover timestamp
+    Then original responses, payment IDs, balances, rows and sequence identities are preserved
+    And each old key becomes completed with a guard and a corresponding result receipt
+    And its expiry is exactly 24 hours after cutover rather than its old creation timestamp
+    And incomplete or invalid legacy results fail without advancing revision or changing data
+    And startup refuses the older revision until upgrade succeeds
+
+  @SC-56
+  Scenario: Reconciliation and cleanup are bounded and financial-data safe
+    Given maintenance candidates include expired completed, abandoned processing, active and corrupt entries
+    When the explicit maintenance command runs with finite batch, batch-count and total-time bounds
+    Then it publishes receipts, fences no-effect abandoned claims and deletes only safely expired generations
+    And active guards are skipped without unbounded waits or spinning
+    And corrupt or unresolved records are retained and operationally signaled without financial execution
+    And no financial rows or balances change and unrelated generations remain intact
+
+  @SC-57
+  Scenario: Two transaction sessions share one request budget and bounded pool
+    Given an admitted request uses distinct lifecycle and business pool sessions for A and B
+    When each phase is observed through independent database transactions
+    Then backend-session evidence confirms A and B are distinct
+    And A is released before B checkout and B is released before publication checkout
+    And combined connection and queued-acquisition counts stay within the declared allocation
+    And no transaction or row lock spans both sessions and no checkout creates a new operation budget
+    And timeout or cancellation at every boundary joins owned work and preserves existing pool handoff rules
+    And exhausted capacity returns bounded safe failure without stranding pool capacity or duplicating effects
+    And any remaining processing entry is retained for safe bounded recovery

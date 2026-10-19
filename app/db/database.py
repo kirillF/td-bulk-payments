@@ -184,7 +184,9 @@ def create_pool(configuration: Settings | str) -> Pool:
     return pool
 
 
-def schema_validation() -> Generator[tuple[str, tuple[object, ...]], list[DictRow]]:
+def schema_validation(
+    lifecycle: bool = False,
+) -> Generator[tuple[str, tuple[object, ...]], list[DictRow]]:
     """One structural oracle shared by async startup and sync migration adoption."""
     columns = {
         "firms": {
@@ -230,6 +232,54 @@ def schema_validation() -> Generator[tuple[str, tuple[object, ...]], list[DictRo
             "CHECK (status_code IS NULL = response_body IS NULL)",
         },
     }
+
+    if lifecycle:
+        columns["bulk_payment_requests"].update(
+            {
+                "state": ("text", True),
+                "generation": ("uuid", True),
+                "owner_token": ("uuid", True),
+                "owner_deadline": ("timestamp with time zone", True),
+                "completed_at": ("timestamp with time zone", False),
+                "expires_at": ("timestamp with time zone", True),
+            }
+        )
+        columns["request_execution_guards"] = {
+            "generation": ("uuid", True),
+            "payer_firm_uuid": ("text", True),
+            "idempotency_key": ("text", True),
+        }
+        columns["request_result_receipts"] = {
+            "generation": ("uuid", True),
+            "owner_token": ("uuid", True),
+            "request_fingerprint": ("text", True),
+            "status_code": ("integer", True),
+            "response_body": ("jsonb", True),
+            "committed_at": ("timestamp with time zone", True),
+        }
+        constraints["bulk_payment_requests"].update(
+            {
+                "UNIQUE (generation)",
+                "UNIQUE (payer_firm_uuid,idempotency_key,generation)",
+                "CHECK (state = ANY ARRAY['processing'::text,'completed'::text])",
+                "CHECK ((state='processing'::text AND status_code IS NULL "
+                "AND response_body IS NULL "
+                "AND completed_at IS NULL) OR (state='completed'::text AND status_code IS NOT NULL "
+                "AND response_body IS NOT NULL AND completed_at IS NOT NULL))",
+            }
+        )
+        constraints["request_execution_guards"] = {
+            "PRIMARY KEY (generation)",
+            "FOREIGN KEY (payer_firm_uuid,idempotency_key,generation) REFERENCES "
+            "bulk_payment_requests(payer_firm_uuid,idempotency_key,generation) ON DELETE CASCADE",
+        }
+        constraints["request_result_receipts"] = {
+            "PRIMARY KEY (generation)",
+            "FOREIGN KEY (generation) REFERENCES request_execution_guards(generation) "
+            "ON DELETE CASCADE",
+            "CHECK (length(request_fingerprint) = 64)",
+            "CHECK (status_code = ANY ARRAY[201,422])",
+        }
 
     def normalized(value: str) -> str:
         return "".join(value.split()).replace("(", "").replace(")", "")
@@ -286,9 +336,58 @@ def schema_validation() -> Generator[tuple[str, tuple[object, ...]], list[DictRo
     if len(rows) != 1 or rows[0]["expression"] != "now()":
         raise ValueError("Incompatible request timestamp default")
 
+    if lifecycle:
+        for index, column, predicate in [
+            ("request_expiry_idx", "expires_at", None),
+            ("request_processing_deadline_idx", "owner_deadline", "state='processing'::text"),
+        ]:
+            rows = yield (
+                "SELECT i.indisvalid AND NOT i.indisunique AND i.indnkeyatts=1 "
+                "AND i.indrelid='bulk_payment_requests'::regclass AND i.indkey[0]="
+                "(SELECT attnum FROM pg_attribute WHERE attrelid=i.indrelid AND attname=%s) "
+                "AND am.amname='btree' AS valid,pg_get_expr(i.indpred,i.indrelid) AS predicate "
+                "FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+                "JOIN pg_am am ON am.oid=c.relam WHERE i.indexrelid=%s::regclass",
+                (column, index),
+            )
+            if (
+                not rows
+                or not rows[0]["valid"]
+                or (normalized(rows[0]["predicate"] or "") != normalized(predicate or ""))
+            ):
+                raise ValueError("Required request lifecycle index missing")
+        rows = yield (
+            "SELECT attcollation='pg_catalog.\"C\"'::regcollation AS valid "
+            "FROM pg_attribute WHERE attrelid='request_execution_guards'::regclass "
+            "AND attname='idempotency_key' AND NOT attisdropped",
+            (),
+        )
+        if not rows or not rows[0]["valid"]:
+            raise ValueError("Incompatible guard key collation")
+        rows = yield (
+            "SELECT a.attname,pg_get_expr(d.adbin,d.adrelid) AS expression "
+            "FROM pg_attribute a LEFT JOIN pg_attrdef d "
+            "ON a.attrelid=d.adrelid AND a.attnum=d.adnum "
+            "WHERE a.attrelid='bulk_payment_requests'::regclass "
+            "AND a.attname IN ('state','generation','owner_token','owner_deadline',"
+            "'completed_at','expires_at') AND NOT a.attisdropped",
+            (),
+        )
+        if len(rows) != 6 or any(row["expression"] is not None for row in rows):
+            raise ValueError("Incompatible lifecycle defaults")
+        rows = yield (
+            "SELECT pg_get_expr(d.adbin,d.adrelid) AS expression FROM pg_attrdef d "
+            "JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum "
+            "WHERE a.attrelid='request_result_receipts'::regclass AND a.attname='committed_at'",
+            (),
+        )
+        if len(rows) != 1 or rows[0]["expression"] != "now()":
+            raise ValueError("Incompatible receipt timestamp default")
+
 
 async def validate_schema(connection: AsyncConnection[DictRow]) -> None:
-    checks = schema_validation()
+    await validate_revision(connection)
+    checks = schema_validation(lifecycle=True)
     query = next(checks)
     while True:
         rows = await (await connection.execute(*query)).fetchall()
@@ -296,8 +395,6 @@ async def validate_schema(connection: AsyncConnection[DictRow]) -> None:
             query = checks.send(rows)
         except StopIteration:
             break
-
-    await validate_revision(connection)
 
 
 async def validate_revision(connection: AsyncConnection[DictRow]) -> None:
@@ -318,8 +415,18 @@ async def validate_revision(connection: AsyncConnection[DictRow]) -> None:
         raise ValueError("Unsupported database revision; run migrations before startup")
 
 
-def validate_schema_sync(connection: psycopg.Connection[Any]) -> None:
-    checks = schema_validation()
+def validate_schema_sync(
+    connection: psycopg.Connection[Any], *, lifecycle: bool | None = None
+) -> None:
+    if lifecycle is None:
+        with connection.cursor() as detector:
+            detected = detector.execute(
+                "SELECT to_regclass('request_execution_guards') IS NOT NULL"
+            ).fetchone()
+            if detected is None:
+                raise ValueError("Cannot determine schema generation")
+            lifecycle = bool(detected[0])
+    checks = schema_validation(lifecycle=lifecycle)
     query = next(checks)
     with connection.cursor(row_factory=dict_row) as cursor:
         while True:

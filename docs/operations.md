@@ -87,3 +87,13 @@ An initialization error for unsupported revision means the service has not enter
 serving lifespan. Check the deployed revision resources and explicit upgrade outcome;
 do not bypass the gate with a blind stamp. Readiness only probes the already-initialized
 service and database availability; it does not execute migrations or create records.
+
+The request lifecycle revision requires stopping/draining old app writers before upgrade;
+mixed old/new writers are unsupported. It preserves financial rows, identity sequences
+and cached results, adds execution guards and business-result receipts, and gives existing
+completed keys a full 24-hour retention window from one migration cutover timestamp.
+Malformed/incomplete retained outcomes fail migration rather than become new requests.
+Lifecycle downgrade is deliberately refused because it would discard safety metadata.
+The migration-first intermediate image is private: its new payment writer is delivered in
+the subsequent middleware/controller slice. Migration/startup verification alone does not
+establish payment API delivery or acceptance.
