@@ -2,32 +2,15 @@
 
 from collections import defaultdict
 
-from psycopg import AsyncConnection
-from psycopg.rows import DictRow
-
 from app.core.logging import stage
 from app.core.observability import phase
+from app.crud import payments as storage
+from app.db.database import Connection, Row
 from app.models.payment import TransferPlan, TransferResult
 from app.schemas.payments import MAX_CENTS, BulkPayment, BulkPaymentResponse, PaymentCreated
 
 
-async def lock_firms(
-    connection: AsyncConnection[DictRow], request: BulkPayment
-) -> dict[str, DictRow]:
-    firm_uuids = sorted(
-        {str(request.payer_firm_uuid), *(str(p.payee_firm_uuid) for p in request.payments)}
-    )
-    rows = await (
-        await connection.execute(
-            """SELECT id, uuid, balance_cents FROM firms
-           WHERE uuid = ANY(%s::text[]) ORDER BY id FOR NO KEY UPDATE""",
-            (firm_uuids,),
-        )
-    ).fetchall()
-    return {row["uuid"]: row for row in rows}
-
-
-def plan_transfer(request: BulkPayment, firms: dict[str, DictRow]) -> TransferPlan | TransferResult:
+def plan_transfer(request: BulkPayment, firms: dict[str, Row]) -> TransferPlan | TransferResult:
     """Validate locked balances and compute every delta before permitting writes."""
     payer_uuid = str(request.payer_firm_uuid)
     required = {payer_uuid, *(str(p.payee_firm_uuid) for p in request.payments)}
@@ -45,39 +28,22 @@ def plan_transfer(request: BulkPayment, firms: dict[str, DictRow]) -> TransferPl
     return TransferPlan(payer["id"], {uuid: row["id"] for uuid, row in firms.items()}, dict(deltas))
 
 
-async def apply_balances(connection: AsyncConnection[DictRow], deltas: dict[int, int]) -> None:
-    await connection.execute(
-        """UPDATE firms SET balance_cents = firms.balance_cents + changes.delta
-           FROM unnest(%s::integer[], %s::bigint[]) AS changes(id, delta)
-           WHERE firms.id = changes.id""",
-        (list(deltas), list(deltas.values())),
-    )
-
-
 async def insert_payments(
-    connection: AsyncConnection[DictRow], request: BulkPayment, plan: TransferPlan
+    connection: Connection, request: BulkPayment, plan: TransferPlan
 ) -> BulkPaymentResponse:
     created = []
     for ordinal, payment in enumerate(request.payments, 1):
         with stage("payments.insert", ordinal=ordinal):
-            inserted = await (
-                await connection.execute(
-                    """INSERT INTO payments
-                   (payer_firm_id, payee_firm_id, amount_cents, description)
-                   VALUES (%s, %s, %s, %s) RETURNING id""",
-                    (
-                        plan.payer_id,
-                        plan.payee_ids[str(payment.payee_firm_uuid)],
-                        payment.amount_cents,
-                        payment.description,
-                    ),
-                )
-            ).fetchone()
-            if inserted is None:
-                raise RuntimeError("payment insertion returned no ID")
+            payment_id = await storage.create(
+                connection,
+                plan.payer_id,
+                plan.payee_ids[str(payment.payee_firm_uuid)],
+                payment.amount_cents,
+                payment.description,
+            )
             created.append(
                 PaymentCreated(
-                    id=inserted["id"],
+                    id=payment_id,
                     payer_firm_uuid=request.payer_firm_uuid,
                     payee_firm_uuid=payment.payee_firm_uuid,
                     amount_cents=payment.amount_cents,
@@ -93,11 +59,12 @@ class BulkPaymentService:
     """Execute monetary work using an existing transaction-owned connection."""
 
     @staticmethod
-    async def transfer(
-        connection: AsyncConnection[DictRow], request: BulkPayment
-    ) -> TransferResult:
+    async def transfer(connection: Connection, request: BulkPayment) -> TransferResult:
         with phase("firms.lock"):
-            firms = await lock_firms(connection, request)
+            firm_uuids = sorted(
+                {str(request.payer_firm_uuid), *(str(p.payee_firm_uuid) for p in request.payments)}
+            )
+            firms = await storage.lock_firms(connection, firm_uuids)
         with stage("payments.plan"):
             plan = plan_transfer(request, firms)
         if isinstance(plan, TransferResult):
@@ -105,6 +72,6 @@ class BulkPaymentService:
         # Every participant is already locked and every resulting balance validated.
         with phase("payments.persist"):
             with stage("payments.balances"):
-                await apply_balances(connection, plan.balance_deltas)
+                await storage.apply_balances(connection, plan.balance_deltas)
             response = await insert_payments(connection, request, plan)
         return TransferResult("accepted", response.model_dump(mode="json"))

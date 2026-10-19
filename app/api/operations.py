@@ -7,7 +7,7 @@ from psycopg_pool import PoolClosed, PoolTimeout, TooManyRequests
 
 from app.core.logging import stage
 from app.core.observability import attempt_result
-from app.db.database import run_owned
+from app.db.database import Connection, is_ready, run_owned
 
 router = APIRouter()
 
@@ -22,10 +22,9 @@ async def ready(request: Request) -> JSONResponse:
     telemetry = request.app.state.telemetry
     pool = request.app.state.pool
 
-    async def probe(connection: psycopg.AsyncConnection[dict[str, object]]) -> bool:
+    async def probe(connection: Connection) -> bool:
         with stage("health.probe"):
-            async with connection.transaction():
-                return await (await connection.execute("SELECT 1")).fetchone() is not None
+            return await is_ready(connection)
 
     try:
         available = await run_owned(

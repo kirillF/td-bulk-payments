@@ -407,8 +407,8 @@ def test_receipt_recovers_after_failed_completed_publication(
 def test_abandoned_owner_is_fenced_before_replacement(application, seeded_database):
     from app.api.v1.payments import execute_admitted
     from app.db.database import run_transaction
-    from app.db.idempotency import publish_completed
     from app.models.idempotency import AdmissionLost
+    from app.services.idempotency import publish_completed
 
     prior_count = count(seeded_database, "payments")
     prior_balance = balances(seeded_database)[PAYER]

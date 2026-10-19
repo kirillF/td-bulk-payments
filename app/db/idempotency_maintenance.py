@@ -7,9 +7,10 @@ import math
 from functools import partial
 
 from app.core.config import Settings
-from app.db import idempotency as storage
+from app.crud import idempotency as storage
 from app.db.database import Pool, create_pool, operation_scope, run_transaction
 from app.schemas.idempotency import StoredResultInvalid
+from app.services import idempotency as service
 
 
 async def maintain(pool: Pool, batch_size: int, max_batches: int) -> dict[str, int]:
@@ -23,10 +24,10 @@ async def maintain(pool: Pool, batch_size: int, max_batches: int) -> dict[str, i
         )
         counts["batches"] += 1
         for row in rows:
-            admission = storage.identity(row)
+            admission = service.identity(row)
             try:
                 result = await run_transaction(
-                    pool, partial(storage.reconcile, admission=admission)
+                    pool, partial(service.reconcile, admission=admission)
                 )
             except StoredResultInvalid:
                 result = "unresolved"

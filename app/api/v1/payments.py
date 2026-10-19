@@ -4,17 +4,15 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from psycopg import AsyncConnection
-from psycopg.rows import DictRow
 
 from app.core.logging import instrument
 from app.core.observability import CURRENT, attempt_result
-from app.db.database import run_transaction
-from app.db.idempotency import acquire_execution_guard, store_receipt
+from app.db.database import Connection, run_transaction
 from app.models.idempotency import Admission, StoredResponse
 from app.schemas.errors import ErrorResponse, ValidationResponse
 from app.schemas.idempotency import validate_result
 from app.schemas.payments import BulkPayment, BulkPaymentResponse
+from app.services.idempotency import acquire_execution_guard, store_receipt
 from app.services.payments import BulkPaymentService
 
 router = APIRouter()
@@ -28,7 +26,7 @@ def request_schema() -> dict[str, Any]:
 
 @instrument("controller.execute")
 async def execute_admitted(
-    connection: AsyncConnection[DictRow], body: BulkPayment, admission: Admission
+    connection: Connection, body: BulkPayment, admission: Admission
 ) -> StoredResponse:
     await acquire_execution_guard(connection, admission)
     result = await BulkPaymentService.transfer(connection, body)

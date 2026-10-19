@@ -2,7 +2,7 @@
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -18,6 +18,52 @@ from psycopg_pool.pool_async import ReturnConnection
 from app.core.config import Settings
 from app.core.logging import instrument
 from app.core.observability import CURRENT, attempt_result, phase
+
+# Application persistence uses this API; driver sessions never own domain policy.
+type Connection = AsyncConnection[DictRow]
+type Row = DictRow
+type Parameters = Sequence[Any]
+
+
+async def execute(connection: Connection, query: str, parameters: Parameters = ()) -> int:
+    """Execute a parameterized command and return its affected row count."""
+    cursor = await connection.execute(query, parameters)
+    try:
+        return cursor.rowcount
+    finally:
+        await cursor.close()
+
+
+async def fetch_one(connection: Connection, query: str, parameters: Parameters = ()) -> Row | None:
+    cursor = await connection.execute(query, parameters)
+    try:
+        return await cursor.fetchone()
+    finally:
+        await cursor.close()
+
+
+async def fetch_all(connection: Connection, query: str, parameters: Parameters = ()) -> list[Row]:
+    cursor = await connection.execute(query, parameters)
+    try:
+        return await cursor.fetchall()
+    finally:
+        await cursor.close()
+
+
+@asynccontextmanager
+async def savepoint(connection: Connection) -> AsyncIterator[None]:
+    """Isolate recoverable statement failures inside an existing transaction."""
+    if connection.info.transaction_status != TransactionStatus.INTRANS:
+        raise RuntimeError("A savepoint requires an active transaction")
+    async with connection.transaction():
+        yield
+
+
+async def is_ready(connection: Connection) -> bool:
+    """A finite caller-owned checkout probes connectivity and leaves no transaction."""
+    async with connection.transaction():
+        return await fetch_one(connection, "SELECT 1") is not None
+
 
 OPERATION_END: ContextVar[float | None] = ContextVar("payment_operation_end", default=None)
 

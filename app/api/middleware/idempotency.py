@@ -17,10 +17,9 @@ from app.db.database import (
     operation_scope,
     run_transaction,
 )
-from app.db.idempotency import publish_completed, release_failed
 from app.models.idempotency import Admission, AdmissionLost, Completed, Conflict
 from app.schemas.idempotency import StoredResultInvalid, prepare_request, validate_result
-from app.services.idempotency import check
+from app.services.idempotency import check, publish_completed, release_failed
 
 
 async def idempotency_middleware(
