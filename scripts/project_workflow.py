@@ -276,6 +276,7 @@ def check(group: str) -> Path:
             "CRUD_IMPLEMENTING",
             "REVIEW6_REPAIRING",
             "OPERATOR_REFINEMENT_IMPLEMENTING",
+            "REVIEW7_REPAIRING",
         }:
             if state.get("lifecycle_approval_sha256") != LIFECYCLE_AMENDMENT:
                 raise ValueError("Unknown lifecycle authority")
@@ -307,7 +308,9 @@ def check(group: str) -> Path:
         if group not in authority["tasks"][task]["checks"]:
             raise ValueError("Check is not part of the current approved slice")
         deadline = (
-            operator_refinement_deadline(state)
+            review7_repair_deadline(state)
+            if state.get("status") == "REVIEW7_REPAIRING"
+            else operator_refinement_deadline(state)
             if state.get("status") == "OPERATOR_REFINEMENT_IMPLEMENTING"
             else crud_deadline(state)
             if state.get("status") == "CRUD_IMPLEMENTING"
@@ -320,9 +323,12 @@ def check(group: str) -> Path:
             "CRUD_IMPLEMENTING",
             "REVIEW6_REPAIRING",
             "OPERATOR_REFINEMENT_IMPLEMENTING",
+            "REVIEW7_REPAIRING",
         }:
             deadline = (
-                operator_refinement_deadline(state)
+                review7_repair_deadline(state)
+                if state.get("status") == "REVIEW7_REPAIRING"
+                else operator_refinement_deadline(state)
                 if state.get("status") == "OPERATOR_REFINEMENT_IMPLEMENTING"
                 else crud_deadline(state)
                 if state.get("status") == "CRUD_IMPLEMENTING"
@@ -995,6 +1001,76 @@ def operator_design_overrides(prior: dict[str, str]) -> dict[str, str]:
     return result
 
 
+REVIEW7_REPAIR = "b958d2c860821863fda1b472975b7582d3265fd102db9ac7b3f1a468c81c9b37"
+
+
+def review7_repair_authority() -> dict[str, Any]:
+    value = approval(
+        STORE / f"{REVIEW7_REPAIR}.payload.json",
+        {
+            "purpose": "project-local-review7-finding-bound-repair-v1",
+            "project": str(ROOT),
+            "scope_id": "bulk-payments",
+        },
+    )
+    for name, expected in value["artifacts"].items():
+        path = Path(name)
+        if (
+            path.is_symlink()
+            or ROOT not in path.resolve().parents
+            or digest(path.read_bytes()) != expected
+        ):
+            raise ValueError("Approved review7 artifact index changed")
+        for artifact, sha in json.loads(path.read_text()).items():
+            source = Path(artifact)
+            if (
+                source.is_symlink()
+                or ROOT not in source.resolve().parents
+                or digest(source.read_bytes()) != sha
+            ):
+                raise ValueError("Approved review7 artifact changed")
+    return value
+
+
+def review7_repair_deadline(state: dict[str, Any]) -> float:
+    review7_repair_authority()
+    attempt = state["review7_repair_attempt"]
+    if attempt["approval_sha256"] != REVIEW7_REPAIR or state["repair_rounds_used"] != 6:
+        raise ValueError("Unknown review7 repair attempt")
+    if attempt["deadline_epoch"] != attempt["started_epoch"] + 1800:
+        raise ValueError("Review7 repair allowance changed")
+    baseline = json.loads((STATE / "review7-repair-amendment/source-baseline.json").read_text())
+    if (
+        state["review6_repair_attempt"] != baseline["original_repair_attempt"]
+        or state["operator_refinement_attempt"] != baseline["operator_continuation"]
+    ):
+        raise ValueError("Historical attempts changed")
+    return float(attempt["deadline_epoch"])
+
+
+def review7_design_overrides(prior: dict[str, str]) -> dict[str, str]:
+    directory = STATE / "review7-repair-amendment"
+    path = directory / "contract-alignment.json"
+    if not path.exists():
+        return prior
+    review7_repair_authority()
+    alignment = json.loads(path.read_text())
+    if alignment["approval_sha256"] != REVIEW7_REPAIR:
+        raise ValueError("Unknown review7 alignment authority")
+    changes = alignment["changes"]
+    if set(changes) != {name for name in prior if name.startswith("docs/features/")}:
+        raise ValueError("Unexpected review7 contract paths")
+    result = dict(prior)
+    for name, change in changes.items():
+        snapshot = directory / "aligned-contracts" / Path(name).name
+        if change["preimage_sha256"] != prior[name]:
+            raise ValueError("Review7 contract preimage mismatch")
+        if snapshot.is_symlink() or digest(snapshot.read_bytes()) != change["postimage_sha256"]:
+            raise ValueError("Review7 contract snapshot changed")
+        result[name] = change["postimage_sha256"]
+    return result
+
+
 def feature_authority(payload: Path) -> dict[str, Any]:
     policy()
     value = approval(
@@ -1015,6 +1091,7 @@ def feature_authority(payload: Path) -> dict[str, Any]:
     overrides = crud_design_overrides(overrides)
     overrides = review6_design_overrides(overrides)
     overrides = operator_design_overrides(overrides)
+    overrides = review7_design_overrides(overrides)
     for name, original in value["artifacts"].items():
         expected = overrides.get(name, original)
         path = ROOT / name

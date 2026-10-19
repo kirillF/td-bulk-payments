@@ -437,8 +437,42 @@ def test_signal_denial_retains_failed_process_evidence(tmp_path, monkeypatch, de
 
 def test_operator_continuation_preserves_original_deadline():
     state = json.loads((workflow.STATE / "feature-state.json").read_text())
+    state["repair_rounds_used"] = 5  # Validate the preserved historical attempt context.
     deadline = workflow.operator_refinement_deadline(state)
     assert deadline == state["operator_refinement_attempt"]["started_epoch"] + 1800
     state["review6_repair_attempt"]["deadline_epoch"] += 1
     with pytest.raises(ValueError, match="history changed"):
         workflow.operator_refinement_deadline(state)
+
+
+def test_review7_repair_authenticates_and_preserves_history():
+    state = json.loads((workflow.STATE / "feature-state.json").read_text())
+    assert (
+        workflow.review7_repair_deadline(state)
+        == state["review7_repair_attempt"]["started_epoch"] + 1800
+    )
+    state["operator_refinement_attempt"]["deadline_epoch"] += 1
+    with pytest.raises(ValueError, match="Historical attempts changed"):
+        workflow.review7_repair_deadline(state)
+
+
+def test_current_coverage_registry_matches_executable_contract():
+    from gherkin.parser import Parser
+    from gherkin.pickles.compiler import Compiler
+
+    contract = json.loads((workflow.ROOT / "docs/features/bulk-payments/feature.json").read_text())
+    text = (workflow.ROOT / "docs/features/bulk-payments/scenarios.feature").read_text()
+    document = Parser().parse(text)
+    document["uri"] = "bulk-payments.feature"
+    scenarios = [node["scenario"] for node in document["feature"]["children"] if "scenario" in node]
+    identifiers = {
+        tag["name"][1:]
+        for scenario in scenarios
+        for tag in scenario["tags"]
+        if tag["name"].startswith("@SC-")
+    }
+    assert set(contract["scenario_ids"]) == identifiers
+    assert contract["coverage_target"]["scenarios"] == len(scenarios)
+    assert contract["coverage_target"]["expanded_cases"] == len(Compiler().compile(document))
+    assert contract["coverage_target"]["tasks"] == len(contract["task_definitions"])
+    assert contract["coverage_target"]["groups"] == len(contract["check_definitions"])

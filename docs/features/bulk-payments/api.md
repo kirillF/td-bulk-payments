@@ -176,3 +176,5 @@ external cancellation propagates after bounded owned-task cleanup, and the pool'
 ownership handoff remains authoritative. No hidden fresh deadline per phase.
 
 Telemetry derives templates and supported method labels from the configured API composition, including prefixes. Unknown paths use unmatched; unsupported methods use OTHER. Probe policy belongs to route declarations. This does not change public endpoints or response bodies.
+
+Durable success-envelope counts, totals, payment IDs and cents require JSON integers; corrupt boolean, string or floating-point representations fail closed with safe503 on replay. Valid UUID strings remain supported. Incoming amount strings and the public success shape are unchanged.

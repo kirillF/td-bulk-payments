@@ -399,3 +399,6 @@ verification bounds. No reset of historical attempts, deadlines or counters.
 
 ## Operator route/planner refinement continuation
 Task operator-route-planner-refinement applies API-owned telemetry metadata and caller-only firm completeness validation. Preserve the expired original repair5 attempt; the separately approved 1800-second continuation includes at least360 seconds verification/handoff. Bind SC60 six configuration cases:60 scenarios/106 expanded cases. Refresh all12 groups on one candidate and use only reserved review7; final acceptance remains a separate gate. Preserve failed signal-denied run uncertainty and validate bounded failure evidence.
+
+## Authenticated review7 finding repair
+Task review7-durable-cleanup-registry strengthens existing SC44/50/55 regression oracles and aligns current coverage metadata. No new FR/NFR or Gherkin case is introduced:60 scenarios/106 cases remain. Repair6 has1800s aggregate including>=360s verification; all12 groups precede only independent review8 under its separate1200s aggregate. Immutable history/migrations and separate acceptance remain preserved.

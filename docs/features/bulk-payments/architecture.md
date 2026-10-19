@@ -186,3 +186,5 @@ Oversized integer conversion is covered alongside the existing safe nesting reje
 
 ### Configured HTTP telemetry boundary
 API composition installs public leaf route declarations and generates immutable metadata matchers before serving. ProbeRoute declares operational policy at the route owner. Core consumes injected RequestRoute metadata before dispatch, including middleware short circuits; it owns no endpoint, method or probe URL inventory. Parameter values never become labels. Each application freezes its own composition.
+
+Cleanup failure diagnostics are recorded once at the database ownership boundary. A request-local failure marker remains independent of its eventual cancellation, timeout or unknown-commit outcome, so final structured severity and failure metrics cannot hide cleanup failure.

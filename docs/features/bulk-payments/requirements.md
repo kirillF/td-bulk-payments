@@ -194,3 +194,5 @@ bounded pool, with physical session reuse permitted and pool_max=1 supported.
 | SC-59 | Existing FR-1, FR-15, FR-17; INV-6: raw decoder boundary failures return safe422 with diagnostic metadata before admission or financial changes. Payload dimensions are test-profile values, not product limits. |
 
 | SC-60 | NFR-6–7: API-configured routes, methods, prefixes and probe policy govern bounded redacted signals, including pre-dispatch arrival/completion. |
+
+Review7 verification clarification: existing corrupt-result rejection (FR-11/FR-19, SC50/55) includes coercible non-integer durable fields; cleanup failure reporting under NFR-6/9 and SC44 must remain visible at default severity after cancellation/timeout mapping. These are existing invariants, not new product limits or requirements.

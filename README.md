@@ -6,7 +6,7 @@ access uses explicit parameterized SQL, without an ORM.
 The implementation provides atomic batches, durable idempotency, complete ordered payment
 IDs, indexed UUID lookup, configurable resource bounds and structured observability.
 Verification uses executable Gherkin and real PostgreSQL/container HTTP checks.
-The current target has58 scenarios/98 expanded cases; full lifecycle integration is pending. Formal feature acceptance and external deployment remain separate decisions.
+The executable contract contains60 scenarios/106 expanded cases. Candidate-bound checks and independent review establish verification status; formal feature acceptance and external deployment remain separate decisions.
 
 ## Run locally
 
