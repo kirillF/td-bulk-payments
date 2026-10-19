@@ -396,6 +396,7 @@ def test_info_logs_only_lifecycle_and_classified_failure(application, monkeypatc
     events = [json.loads(x) for x in logs]
     assert len([e for e in events if e["event"] == "http.request.arrived"]) == 4
     assert not any(e["event"].startswith("stage.") for e in events)
+    assert not any(e["event"] == "database.cleanup.failed" for e in events)
     failures = [e for e in complete if e["status_code"] == 503]
     assert len(failures) == 1 and failures[0]["level"] == "WARNING"
     assert failures[0]["error_code"] == "pool_exhausted"

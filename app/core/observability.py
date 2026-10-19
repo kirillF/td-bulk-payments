@@ -378,7 +378,9 @@ class Telemetry:
                 self.attempts.labels(outcome).inc()
                 if context.created:
                     self.created.inc(context.created)
-                if outcome in {"transient_failure", "unknown_commit", "invariant_breach"}:
+                if context.cleanup_failed:
+                    self.failures.labels("cleanup_failed").inc()
+                elif outcome in {"transient_failure", "unknown_commit", "invariant_breach"}:
                     self.failures.labels(context.error_code or outcome).inc()
                 for name, _start, _end, duration, result in context.phases:
                     if name == "pool.acquire":
@@ -403,8 +405,12 @@ class Telemetry:
                     trace_id=f"{span_context.trace_id:032x}", span_id=f"{span_context.span_id:016x}"
                 )
                 context.span.set_attribute("payment.outcome", outcome)
-                if outcome in {"transient_failure", "unknown_commit", "invariant_breach"} or (
-                    status is not None and status >= 500
+                if context.cleanup_failed:
+                    context.span.set_attribute("database.cleanup_failed", True)
+                if (
+                    context.cleanup_failed
+                    or outcome in {"transient_failure", "unknown_commit", "invariant_breach"}
+                    or (status is not None and status >= 500)
                 ):
                     context.span.set_status(trace.Status(trace.StatusCode.ERROR))
                 if status is not None:
@@ -420,6 +426,8 @@ class Telemetry:
                 context.span.end()
         except Exception:
             self.drop("traces")
+        if context.cleanup_failed:
+            fields["cleanup_error_code"] = "cleanup_failed"
         if context.error_code is not None:
             fields["error_code"] = context.error_code
         if context.error_type is not None:
@@ -428,7 +436,7 @@ class Telemetry:
             fields["sqlstate"] = context.sqlstate
         level = (
             "ERROR"
-            if outcome == "invariant_breach"
+            if context.cleanup_failed or outcome == "invariant_breach"
             else "WARNING"
             if outcome in {"unknown_commit", "transient_failure"}
             or (status is not None and status >= 500)

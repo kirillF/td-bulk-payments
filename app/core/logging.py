@@ -21,6 +21,7 @@ FIELDS = {
     "duration_ms",
     "outcome",
     "error_code",
+    "cleanup_error_code",
     "error_type",
     "sqlstate",
     "ready",
@@ -37,6 +38,7 @@ EVENTS = {
     "stage.started",
     "stage.completed",
     "stage.failed",
+    "database.cleanup.failed",
 }
 STAGES = {
     "request.prepare",
@@ -153,3 +155,18 @@ def instrument[**P, T](
         return observed
 
     return decorate
+
+
+def record_cleanup_failure() -> None:
+    """Retain one safe owner diagnostic independently of the request outcome."""
+    context = CURRENT.get()
+    if context is None or context.cleanup_failed:
+        return
+    context.cleanup_failed = True
+    if context.logger is not None:
+        context.logger.event(
+            "database.cleanup.failed",
+            level="ERROR",
+            **request_fields(context),
+            cleanup_error_code="cleanup_failed",
+        )

@@ -25,6 +25,7 @@ class RequestContext:
     outcome: str = ""
     created: int = 0
     commit_candidate: bool = False
+    cleanup_failed: bool = False
     error_type: str | None = None
     sqlstate: str | None = None
     error_code: str | None = None

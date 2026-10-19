@@ -16,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from psycopg_pool.pool_async import ReturnConnection
 
 from app.core.config import Settings
-from app.core.logging import instrument
+from app.core.logging import instrument, record_cleanup_failure
 from app.core.observability import CURRENT, attempt_result, phase
 
 # Application persistence uses this API; driver sessions never own domain policy.
@@ -197,6 +197,7 @@ async def run_owned[T](
                 continue
         cleanup_error = cleanup_task.result()
         if cleanup_error is not None:
+            record_cleanup_failure()
             attempt_result(
                 "invariant_breach",
                 error=cleanup_error

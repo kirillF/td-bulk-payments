@@ -553,16 +553,37 @@ def test_checkout_handoff_has_no_cancellable_pruning_gap(seeded_database, monkey
         assert count(seeded_database, "payments") == 1
 
 
-def test_external_cancellation_survives_cleanup_timeout_after_return(application, monkeypatch):
+@pytest.mark.parametrize("reason", ["cancel", "timeout"])
+def test_external_cancellation_survives_cleanup_timeout_after_return(
+    application, monkeypatch, reason
+):
     import asyncio
+    import json
 
-    from app.db.database import run_owned
+    from app.core.observability import attempt_result
+    from app.core.request_context import CURRENT
+    from app.db.database import OperationDeadlineExceeded, run_transaction
+
+    from .test_observability import wait_events
+
+    logs = []
+    telemetry = application.state.telemetry
+    telemetry.sink = logs.append
 
     async def exercise():
         pool = application.state.pool
         original = pool.return_owned
-        returned = asyncio.Event()
-        release = asyncio.Event()
+        returned, release = asyncio.Event(), asyncio.Event()
+        monkeypatch.setattr(
+            pool,
+            "settings",
+            pool.settings.model_copy(
+                update={
+                    "operation_budget_ms": 300,
+                    "response_margin_ms": 100,
+                }
+            ),
+        )
 
         async def delayed(connection, owner):
             await original(connection, owner)
@@ -574,15 +595,33 @@ def test_external_cancellation_survives_cleanup_timeout_after_return(application
         async def work(connection):
             return 1
 
-        operation = asyncio.create_task(run_owned(pool, work, 300, 100))
+        context = telemetry.begin(
+            {
+                "type": "http",
+                "path": "/v1/bulk-payments",
+                "method": "POST",
+                "root_path": "",
+                "headers": [(b"x-correlation-id", b"cleanup-attempt")],
+            }
+        )
+        token = CURRENT.set(context)
+        operation = asyncio.create_task(run_transaction(pool, work))
         await returned.wait()
         reassigned = await pool.getconn()
         try:
-            operation.cancel()
             start = asyncio.get_running_loop().time()
-            with pytest.raises(asyncio.CancelledError):
-                await operation
-            assert asyncio.get_running_loop().time() - start < 0.5
+            if reason == "cancel":
+                operation.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await operation
+                assert context.outcome == "client_disconnected"
+            else:
+                with pytest.raises(OperationDeadlineExceeded) as error:
+                    await operation
+                # The outer protocol mapper may classify timeout after the owning boundary.
+                attempt_result("transient_failure", error=error.value)
+            assert asyncio.get_running_loop().time() - start < 0.6
+            assert context.cleanup_failed
             assert not reassigned.closed
             assert await (await reassigned.execute("SELECT 1")).fetchone() is not None
             assert not pool.active_operations
@@ -594,8 +633,28 @@ def test_external_cancellation_survives_cleanup_timeout_after_return(application
             await reassigned.rollback()
             monkeypatch.setattr(pool, "return_owned", original)
             await pool.putconn(reassigned)
+            telemetry.finish(context, None if reason == "cancel" else 503)
+            CURRENT.reset(token)
 
     application.state.test_client.portal.call(exercise)
+    complete = wait_events(logs, 1)[0]
+    events = [json.loads(line) for line in logs]
+    diagnostic = [e for e in events if e["event"] == "database.cleanup.failed"]
+    assert len(diagnostic) == 1 and diagnostic[0]["level"] == "ERROR"
+    assert complete["level"] == "ERROR" and complete["cleanup_error_code"] == "cleanup_failed"
+    assert complete["outcome"] == (
+        "client_disconnected" if reason == "cancel" else "transient_failure"
+    )
+    assert diagnostic[0]["request_id"] == complete["request_id"]
+    assert diagnostic[0]["trace_id"] == complete["trace_id"]
+    assert diagnostic[0]["correlation_id"] == complete["correlation_id"] == "cleanup-attempt"
+    assert not any(e["event"].startswith("stage.") for e in events)
+    assert (
+        telemetry.registry.get_sample_value(
+            "firm_payments_db_failures_total", {"category": "cleanup_failed"}
+        )
+        == 1
+    )
 
 
 @pytest.mark.parametrize("cancel_caller", [False, True])
