@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, Response
 from psycopg_pool import PoolClosed, PoolTimeout, TooManyRequests
 
 from app.api.errors import invalid_request
+from app.core.logging import stage
 from app.core.observability import attempt_result
 from app.db.database import (
     CommitUncertain,
@@ -29,9 +30,10 @@ async def idempotency_middleware(
         return await call_next(request)
     try:
         async with operation_scope(request.app.state.pool):
-            body, key = prepare_request(
-                await request.body(), request.headers.getlist("Idempotency-Key")
-            )
+            with stage("request.prepare"):
+                body, key = prepare_request(
+                    await request.body(), request.headers.getlist("Idempotency-Key")
+                )
             request.state.prepared_payment = body
             decision = await run_transaction(
                 request.app.state.pool,
@@ -50,7 +52,7 @@ async def idempotency_middleware(
                 return JSONResponse(status_code=result.status_code, content=content)
             if not isinstance(decision, Admission):
                 conflict = isinstance(decision, Conflict)
-                attempt_result("conflict")
+                attempt_result("conflict" if conflict else "processing")
                 return JSONResponse(
                     status_code=409,
                     content={

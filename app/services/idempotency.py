@@ -3,11 +3,13 @@
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
+from app.core.logging import instrument
 from app.db import idempotency as storage
 from app.models.idempotency import Completed, Conflict, Decision, Processing
 from app.schemas.idempotency import StoredResultInvalid
 
 
+@instrument("idempotency.admission")
 async def check(
     connection: AsyncConnection[DictRow], payer: str, key: str, fingerprint: str, budget_ms: int
 ) -> Decision:

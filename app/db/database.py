@@ -16,6 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from psycopg_pool.pool_async import ReturnConnection
 
 from app.core.config import Settings
+from app.core.logging import instrument
 from app.core.observability import CURRENT, attempt_result, phase
 
 OPERATION_END: ContextVar[float | None] = ContextVar("payment_operation_end", default=None)
@@ -120,6 +121,7 @@ async def run_owned[T](
             return await asyncio.shield(task)
     except BaseException as original_error:
 
+        @instrument("database.cleanup")
         async def cleanup() -> BaseException | None:
             try:
                 # close_returns is false: disposal does not perform rollback I/O.

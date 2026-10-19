@@ -5,8 +5,8 @@ access uses explicit parameterized SQL, without an ORM.
 
 The implementation provides atomic batches, durable idempotency, complete ordered payment
 IDs, indexed UUID lookup, configurable resource bounds and structured observability.
-Verification includes the complete approved Gherkin and real PostgreSQL/container HTTP
-checks. Formal feature acceptance and external deployment remain separate decisions.
+Verification uses executable Gherkin and real PostgreSQL/container HTTP checks.
+The current target has58 scenarios/98 expanded cases; full lifecycle integration is pending. Formal feature acceptance and external deployment remain separate decisions.
 
 ## Run locally
 
@@ -30,7 +30,7 @@ uv run --locked python scripts/check.py
 ```
 
 Checks cover Python syntax, lock consistency, source formatting/lint, strict
-application/script typing, all 38 scenarios/70 expanded Gherkin cases, concurrency/failure
+application/script typing, the registered requirement-linked Gherkin cases, concurrency/failure
 boundaries and real clean-image/Compose/HTTP tests. That test uses a
 fresh build context without a virtual environment, unique loopback ports and owned data
 volumes; it proves non-root Python 3.15 HTTP startup and bootstrap preservation of seeded
@@ -47,12 +47,15 @@ records are not required for ordinary CI checks and are never copied into the im
 `POST /v1/bulk-payments` requires `Idempotency-Key`; see the [API contract](docs/features/bulk-payments/api.md).
 Accepted batches return 201 with count, exact total cents and the complete ordered
 `payments` list (`id`, payer/payee UUIDs, cents, description). Validation/business rejection
-returns 422, conflicting payer/key reuse 409, and infrastructure failure 503 with
+returns 422, processing or conflicting payer/key reuse 409, and infrastructure failure 503 with
 `Retry-After: 1`. An uncertain commit can still have succeeded: retry the **same key**.
 
-Amounts use exact integer cents. PostgreSQL reserves the payer/key, locks all firms in
-ascending ID order, checks the entire batch, and commits payments/balances/full replay
-body together. Repeated payees retain separate payment rows; credits are aggregated.
+Amounts use exact integer cents. Middleware commits a processing claim before controller
+admission. The controller locks firms in ascending ID order and atomically commits
+payments, balances and a result receipt. Middleware then publishes the completed result
+in a separate transaction. Duplicates return processing409 until publication or bounded
+receipt recovery, then replay the same result. One pool serves successive checkouts.
+Repeated payees retain separate payment rows; credits are aggregated.
 Business declines are durable, malformed input reserves no key, and replay preserves IDs.
 All participating balance writers must cooperate with the locking protocol.
 
@@ -60,6 +63,7 @@ All participating balance writers must cooperate with the locking protocol.
 docker compose exec -T postgres psql -U firm_payments -d firm_payments < examples/firms.sql
 curl -i http://localhost:8000/v1/bulk-payments \
   -H 'Content-Type: application/json' \
+  -H 'X-Correlation-ID: sample-job' \
   -H 'Idempotency-Key: example-1' --data-binary @examples/bulk-payment.json
 ```
 
@@ -134,3 +138,9 @@ business transactions. Physical connections may be reused; no lifecycle partitio
 is required. Native queue limits apply to every checkout. Include every process and
 maintenance command in the deployment connection budget. Startup does not detect manual
 schema drift with an unchanged Alembic revision; manage schema through migrations.
+
+Operational logs use the dedicated `firm_payments` JSON logger. `X-Correlation-ID` accepts
+one 1–128 character ASCII letters/digits/dot/underscore/hyphen token; malformed or duplicate
+values are replaced. Every application HTTP response returns it and a fresh `X-Request-ID`.
+`PAYMENTS_LOG_LEVEL=INFO` records request arrival/status and classified failures; `DEBUG`
+adds bounded stage and insert-ordinal events. Financial payloads and raw errors are excluded.

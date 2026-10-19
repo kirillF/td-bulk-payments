@@ -956,7 +956,11 @@
         "scripts/harness_checks.py",
         "tests/test_journeys.py",
         "tests/features/bulk_payments.feature",
-        "tests/conftest.py"
+        "tests/conftest.py",
+        "app/api/middleware/idempotency.py",
+        "docs/features/bulk-payments/feature.json",
+        "docs/features/bulk-payments/slices.md",
+        "tests/test_settings.py"
       ],
       "requirements": [
         "FR-15",

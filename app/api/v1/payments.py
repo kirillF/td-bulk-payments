@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
+from app.core.logging import instrument
 from app.core.observability import CURRENT, attempt_result
 from app.db.database import run_transaction
 from app.db.idempotency import acquire_execution_guard, store_receipt
@@ -25,6 +26,7 @@ def request_schema() -> dict[str, Any]:
     return schema
 
 
+@instrument("controller.execute")
 async def execute_admitted(
     connection: AsyncConnection[DictRow], body: BulkPayment, admission: Admission
 ) -> StoredResponse:

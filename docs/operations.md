@@ -23,16 +23,17 @@ that run's project and labelled image; it never prunes unrelated Docker resource
 
 Read `/metrics` in Prometheus format; for example, scrape `localhost:8000/metrics` with
 an interval chosen by the deployment. Counters distinguish committed, replayed, rejected,
-conflicting and failed attempts. `firm_payments_created_total` counts acknowledged new
+processing, conflicting and failed attempts. `firm_payments_created_total` counts acknowledged new
 payments only, never replays. These process-local counters are best effort, not a ledger.
 Histograms use seconds with fixed instrumentation buckets, not promised latency targets.
 Pool gauges read process state without financial SQL.
 
-JSON completion logs include server-generated `request_id`, safe trace/span IDs, route
+JSON arrival and completion logs include effective `correlation_id`, server-generated
+`request_id`, safe trace/span IDs, route
 pattern, bounded outcome/error categories, status and duration. They omit financial
 payloads, keys, fingerprints, database URLs, raw SQL and driver messages. Uvicorn access
-logs are disabled in the image so raw URLs cannot bypass redaction. Normal probes omit
-completion logs; readiness state transitions are recorded instead.
+logs are disabled in the image so raw URLs cannot bypass redaction. Every application HTTP request, including probes, has lifecycle logs; probes remain
+excluded from payment-attempt metrics. Readiness transitions are also recorded.
 
 Telemetry variables: `PAYMENTS_LOG_QUEUE_CAPACITY` (256),
 `PAYMENTS_TRACE_QUEUE_CAPACITY` (512), `PAYMENTS_TRACE_SAMPLE_RATIO` (1),
@@ -113,3 +114,11 @@ INFO traffic logs. Invalid configuration diagnostics omit raw URL/secret-bearing
 Manage all schema changes through Alembic. Startup does not certify manually altered
 objects whose Alembic revision is unchanged; investigate drift and use an explicit repair
 migration or restore a known-good database rather than runtime schema repair.
+
+The dedicated `firm_payments` logger is owned by each application instance and does not
+replace root or third-party handlers. INFO records arrival and status; WARNING/ERROR
+classifies failures once. DEBUG records preparation, admission, controller, guard, planning,
+locks, writes, receipt, commit, publication and cleanup stages. Insert progress contains
+only ordinals. Producer snapshots preserve correlation through async cancellation/cleanup;
+background lifecycle events do not inherit prior request context. Malformed correlation
+headers are replaced rather than logged. Sinks remain bounded and can drop records.

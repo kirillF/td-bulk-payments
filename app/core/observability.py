@@ -1,16 +1,11 @@
 """App-owned, bounded and allowlisted telemetry; monetary code never exports signals."""
 
-import json
-import logging
 import queue
 import re
 import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from contextvars import ContextVar
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -25,6 +20,10 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.config import Settings
+from app.core.logging import StructuredLogger, request_fields, stage
+from app.core.request_context import CURRENT as CURRENT
+from app.core.request_context import RequestContext
+from app.schemas.headers import correlation_id
 
 OUTCOMES = {
     "committed",
@@ -32,6 +31,8 @@ OUTCOMES = {
     "business_rejected",
     "validation_rejected",
     "conflict",
+    "processing",
+    "observed",
     "transient_failure",
     "unknown_commit",
     "invariant_breach",
@@ -60,32 +61,14 @@ ERROR_TYPES = {
 }
 
 
-@dataclass
-class RequestContext:
-    request_id: str
-    route: str
-    method: str
-    started: float
-    span: Any = None
-    outcome: str = ""
-    created: int = 0
-    commit_candidate: bool = False
-    error_type: str | None = None
-    sqlstate: str | None = None
-    error_code: str | None = None
-    phases: list[tuple[str, int, int, float, str]] = field(default_factory=list)
-
-
-CURRENT: ContextVar[RequestContext | None] = ContextVar("payment_request", default=None)
-
-
 @contextmanager
 def phase(name: str) -> Iterator[None]:
     start = time.time_ns()
     monotonic = time.monotonic()
     result = "success"
     try:
-        yield
+        with stage(name):
+            yield
     except BaseException:
         result = "failure"
         raise
@@ -108,7 +91,7 @@ def attempt_result(outcome: str, created: int = 0, error: Exception | None = Non
     context.created = created
     if error is not None:
         context.error_type = (
-            type(error).__name__ if type(error).__name__ in ERROR_TYPES else "InfrastructureError"
+            type(error).__name__ if type(error).__name__ in ERROR_TYPES else "ApplicationError"
         )
         sqlstate = getattr(error, "sqlstate", None)
         context.sqlstate = (
@@ -116,6 +99,8 @@ def attempt_result(outcome: str, created: int = 0, error: Exception | None = Non
             if isinstance(sqlstate, str) and re.fullmatch("[0-9A-Z]{5}", sqlstate)
             else None
         )
+        if context.error_type == "ApplicationError" and context.sqlstate is not None:
+            context.error_type = "DatabaseError"
         context.error_code = (
             {
                 "55P03": "lock_timeout",
@@ -133,6 +118,8 @@ def attempt_result(outcome: str, created: int = 0, error: Exception | None = Non
             or (
                 "connection_failure"
                 if context.error_type == "OperationalError"
+                else "internal_error"
+                if context.error_type == "ApplicationError"
                 else "database_failure"
             )
         )
@@ -231,7 +218,6 @@ class Telemetry:
         self.shutdown_seconds = settings.telemetry_shutdown_ms / 1000
         self.health_budget_ms = settings.health_probe_budget_ms
         self.export_timeout = settings.otlp_timeout_ms
-        self.minimum_log_level = getattr(logging, settings.log_level)
         capacity = settings.log_queue_capacity
         ratio = settings.trace_sample_ratio
         self.registry = CollectorRegistry()
@@ -308,11 +294,7 @@ class Telemetry:
         self.ready: bool | None = None
         self.worker = threading.Thread(target=self._write, daemon=True, name="payment-json-logs")
         self.worker.start()
-        # Library/server diagnostics cannot bypass the application allowlist with raw errors/URLs.
-        for name in ["psycopg", "psycopg.pool", "uvicorn.access", "uvicorn.error", "opentelemetry"]:
-            logger = logging.getLogger(name)
-            logger.handlers = [logging.NullHandler()]
-            logger.propagate = False
+        self.logger = StructuredLogger(settings.log_level, self.queue.put_nowait, self.drop)
         self.event("service.started")
 
     def drop(self, signal: str) -> None:
@@ -325,26 +307,7 @@ class Telemetry:
             pass
 
     def event(self, event: str, **values: Any) -> None:
-        # Filter before formatting or queue admission. Callers use finite severity names.
-        level = values.pop("level", "INFO")
-        if getattr(logging, level, logging.INFO) < self.minimum_log_level:
-            return
-        try:
-            self.queue.put_nowait(
-                json.dumps(
-                    {
-                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                        "level": level,
-                        "service": "firm-payments",
-                        "version": "0.1.0",
-                        "event": event,
-                        **values,
-                    },
-                    ensure_ascii=True,
-                )
-            )
-        except Exception:
-            self.drop("logs")
+        self.logger.event(event, **values)
 
     def _write(self) -> None:
         while not self.stopping.is_set() or not self.queue.empty():
@@ -367,6 +330,9 @@ class Telemetry:
             "/v1/bulk-payments" if path == "/v1/bulk-payments" else "unmatched",
             method if method in {"GET", "POST"} else "OTHER",
             time.monotonic(),
+            correlation_id=correlation_id(scope.get("headers", [])),
+            logger=self.logger,
+            is_probe=path in {"/health/live", "/health/ready", "/metrics"},
         )
         try:
             carrier = {}
@@ -379,33 +345,40 @@ class Telemetry:
             )
         except Exception:
             self.drop("traces")
+        self.logger.event("http.request.arrived", **request_fields(context))
         return context
 
     def finish(self, context: RequestContext, status: int | None) -> None:
         outcome = context.outcome or (
-            "validation_rejected" if status is not None and status < 500 else "transient_failure"
+            "observed"
+            if context.is_probe and status is not None and status < 400
+            else "validation_rejected"
+            if status is not None and status < 500
+            else "transient_failure"
         )
         status_class = (
             str(status // 100) + "xx" if status is not None and 100 <= status < 600 else "none"
         )
         try:
-            self.requests.labels(context.route, context.method, status_class).inc()
-            self.duration.labels(context.route, status_class).observe(
-                time.monotonic() - context.started
-            )
-            self.attempts.labels(outcome).inc()
-            if context.created:
-                self.created.inc(context.created)
-            if outcome in {"transient_failure", "unknown_commit", "invariant_breach"}:
-                self.failures.labels(context.error_code or outcome).inc()
-            for name, _start, _end, duration, result in context.phases:
-                if name == "pool.acquire":
-                    self.acquire.labels(result).observe(duration)
-                elif name == "payment.transaction":
-                    self.transactions.labels(result).observe(duration)
+            if not context.is_probe:
+                self.requests.labels(context.route, context.method, status_class).inc()
+                self.duration.labels(context.route, status_class).observe(
+                    time.monotonic() - context.started
+                )
+                self.attempts.labels(outcome).inc()
+                if context.created:
+                    self.created.inc(context.created)
+                if outcome in {"transient_failure", "unknown_commit", "invariant_breach"}:
+                    self.failures.labels(context.error_code or outcome).inc()
+                for name, _start, _end, duration, result in context.phases:
+                    if name == "pool.acquire":
+                        self.acquire.labels(result).observe(duration)
+                    elif name == "payment.transaction":
+                        self.transactions.labels(result).observe(duration)
         except Exception:
             self.drop("metrics")
         fields = {
+            **request_fields(context),
             "request_id": context.request_id,
             "route": context.route,
             "method": context.method,
@@ -420,7 +393,9 @@ class Telemetry:
                     trace_id=f"{span_context.trace_id:032x}", span_id=f"{span_context.span_id:016x}"
                 )
                 context.span.set_attribute("payment.outcome", outcome)
-                if outcome in {"transient_failure", "unknown_commit", "invariant_breach"}:
+                if outcome in {"transient_failure", "unknown_commit", "invariant_breach"} or (
+                    status is not None and status >= 500
+                ):
                     context.span.set_status(trace.Status(trace.StatusCode.ERROR))
                 if status is not None:
                     context.span.set_attribute("http.response.status_code", status)
@@ -446,6 +421,7 @@ class Telemetry:
             if outcome == "invariant_breach"
             else "WARNING"
             if outcome in {"unknown_commit", "transient_failure"}
+            or (status is not None and status >= 500)
             else "INFO"
         )
         self.event("http.request.completed", level=level, **fields)
@@ -496,8 +472,13 @@ class RequestTelemetryMiddleware:
             nonlocal status, send_failed
             try:
                 if message["type"] == "http.response.start":
-                    message["headers"] = list(message.get("headers", [])) + [
-                        (b"x-request-id", context.request_id.encode())
+                    message["headers"] = [
+                        (name, value)
+                        for name, value in message.get("headers", [])
+                        if name.lower() not in {b"x-request-id", b"x-correlation-id"}
+                    ] + [
+                        (b"x-request-id", context.request_id.encode()),
+                        (b"x-correlation-id", context.correlation_id.encode()),
                     ]
                     await send(message)
                     status = message["status"]
@@ -510,7 +491,9 @@ class RequestTelemetryMiddleware:
 
         try:
             await self.app(scope, receive, traced_send)
-        except Exception:
+        except Exception as error:
+            if context.error_type is None:
+                attempt_result(context.outcome or "transient_failure", context.created, error)
             if status is None and not send_failed:
                 # Generate the sanitized error while correlation is still in scope.
                 # Reraise so the server/client can retain normal error semantics;
@@ -521,10 +504,7 @@ class RequestTelemetryMiddleware:
             raise
         finally:
             try:
-                if scope.get("path") not in {"/health/live", "/health/ready", "/metrics"}:
-                    telemetry.finish(context, status)
-                elif context.span is not None:
-                    context.span.end()
+                telemetry.finish(context, status)
             except Exception:
                 pass
             CURRENT.reset(token)

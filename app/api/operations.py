@@ -5,6 +5,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 from psycopg_pool import PoolClosed, PoolTimeout, TooManyRequests
 
+from app.core.logging import stage
+from app.core.observability import attempt_result
 from app.db.database import run_owned
 
 router = APIRouter()
@@ -21,8 +23,9 @@ async def ready(request: Request) -> JSONResponse:
     pool = request.app.state.pool
 
     async def probe(connection: psycopg.AsyncConnection[dict[str, object]]) -> bool:
-        async with connection.transaction():
-            return await (await connection.execute("SELECT 1")).fetchone() is not None
+        with stage("health.probe"):
+            async with connection.transaction():
+                return await (await connection.execute("SELECT 1")).fetchone() is not None
 
     try:
         available = await run_owned(
@@ -31,7 +34,8 @@ async def ready(request: Request) -> JSONResponse:
             telemetry.health_budget_ms,
             min(pool.settings.response_margin_ms, telemetry.health_budget_ms // 4),
         )
-    except psycopg.Error, PoolTimeout, TooManyRequests, PoolClosed, TimeoutError:
+    except (psycopg.Error, PoolTimeout, TooManyRequests, PoolClosed, TimeoutError) as error:
+        attempt_result("transient_failure", error=error)
         available = False
     telemetry.readiness(available)
     return JSONResponse(

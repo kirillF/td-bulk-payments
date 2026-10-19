@@ -89,6 +89,11 @@ def change_balances(ctx, values):
 
 @given(parsers.re(r"(?P<step>.+)"))
 def arrange(step, ctx, docstring=None):
+    from .test_observability import correlation_step
+
+    if correlation_step(ctx, step, "given"):
+        return
+
     from .test_idempotency import lifecycle_step
 
     if lifecycle_step(ctx, step, "given"):
@@ -281,6 +286,11 @@ def arrange(step, ctx, docstring=None):
 
 @when(parsers.re(r"(?P<step>.+)"))
 def act(step, ctx, docstring=None):
+    from .test_observability import correlation_step
+
+    if correlation_step(ctx, step, "when"):
+        return
+
     from .test_idempotency import lifecycle_step
 
     if lifecycle_step(ctx, step, "when"):
@@ -555,6 +565,11 @@ def act(step, ctx, docstring=None):
 
 @then(parsers.re(r"(?P<step>.+)"))
 def verify(step, ctx, datatable=None):
+    from .test_observability import correlation_step
+
+    if correlation_step(ctx, step, "then"):
+        return
+
     from .test_idempotency import lifecycle_step
 
     if lifecycle_step(ctx, step, "then"):

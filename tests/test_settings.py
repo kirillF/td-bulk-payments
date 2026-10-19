@@ -159,18 +159,18 @@ def test_log_level_normalization_and_actual_filtering():
     def sink(line):
         value = json.loads(line)
         captured.append(value)
-        if value["event"] == "test.warning":
+        if value["event"] == "telemetry.degraded":
             complete.set()
 
     settings = Settings.local("postgresql://fixture", log_level="warning")
     assert settings.log_level == "WARNING"
     telemetry = Telemetry(settings=settings, sink=sink)
     try:
-        telemetry.event("test.debug", level="DEBUG")
-        telemetry.event("test.info", level="INFO")
-        telemetry.event("test.warning", level="WARNING")
+        telemetry.event("stage.started", level="DEBUG")
+        telemetry.event("http.request.arrived", level="INFO")
+        telemetry.event("telemetry.degraded", level="WARNING")
         assert complete.wait(1)
-        assert [value["event"] for value in captured] == ["test.warning"]
+        assert [value["event"] for value in captured] == ["telemetry.degraded"]
     finally:
         telemetry.close()
 

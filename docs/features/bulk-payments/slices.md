@@ -220,6 +220,9 @@ Acceptance:
 Owned paths (shared extensions are sequential):
 
 ```text
+app/api/middleware/idempotency.py
+docs/features/bulk-payments/feature.json
+docs/features/bulk-payments/slices.md
 app/core/logging.py
 app/core/request_context.py
 app/core/observability.py
@@ -232,6 +235,7 @@ app/services/payments.py
 app/services/idempotency.py
 app/db/database.py
 app/db/idempotency.py
+tests/test_settings.py
 tests/test_observability.py
 tests/test_health.py
 tests/test_payments.py

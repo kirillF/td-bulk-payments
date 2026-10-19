@@ -118,9 +118,16 @@ def main() -> None:
                 "pytest",
                 "-q",
                 "tests/test_observability.py",
+                "tests/test_settings.py",
+                "tests/test_resource_failures.py::"
+                "test_stalled_tcp_replies_expire_discard_and_recover[commit]",
+                "tests/test_resource_failures.py::"
+                "test_stalled_tcp_replies_expire_discard_and_recover[rollback]",
+                "tests/test_resource_failures.py::"
+                "test_external_cancellation_joins_operation_and_preserves_recovery[payment]",
                 "tests/test_health.py",
                 "tests/test_journeys.py",
-                "--scenarios=SC-22,SC-23,SC-24,SC-25",
+                "--scenarios=SC-22,SC-23,SC-24,SC-25,SC-39,SC-40,SC-41,SC-42,SC-43,SC-44,SC-47",
             ],
             cwd=ROOT,
             check=True,

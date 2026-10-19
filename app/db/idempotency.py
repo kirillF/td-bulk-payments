@@ -8,10 +8,12 @@ from psycopg.errors import LockNotAvailable
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
+from app.core.logging import instrument
 from app.models.idempotency import Admission, AdmissionLost, StoredResponse
 from app.schemas.idempotency import StoredResultInvalid, validate_result
 
 
+@instrument("idempotency.lookup")
 async def find(connection: AsyncConnection[DictRow], payer: str, key: str) -> DictRow | None:
     return await (
         await connection.execute(
@@ -23,6 +25,7 @@ async def find(connection: AsyncConnection[DictRow], payer: str, key: str) -> Di
     ).fetchone()
 
 
+@instrument("idempotency.claim")
 async def claim(
     connection: AsyncConnection[DictRow], payer: str, key: str, fingerprint: str, budget_ms: int
 ) -> Admission | None:
@@ -65,6 +68,7 @@ def cached(row: DictRow) -> StoredResponse:
     )
 
 
+@instrument("idempotency.guard")
 async def acquire_execution_guard(
     connection: AsyncConnection[DictRow], admission: Admission
 ) -> None:
@@ -85,6 +89,7 @@ async def acquire_execution_guard(
         raise AdmissionLost("Execution admission is no longer current")
 
 
+@instrument("idempotency.receipt")
 async def store_receipt(
     connection: AsyncConnection[DictRow], admission: Admission, response: StoredResponse
 ) -> None:
@@ -118,6 +123,7 @@ async def receipt(
     return cached(row)
 
 
+@instrument("idempotency.publish")
 async def publish_completed(
     connection: AsyncConnection[DictRow], admission: Admission
 ) -> StoredResponse:
@@ -146,6 +152,7 @@ async def publish_completed(
     return result
 
 
+@instrument("idempotency.cleanup")
 async def release_failed(connection: AsyncConnection[DictRow], admission: Admission) -> None:
     """Release only a joined, rolled-back attempt with no durable receipt."""
     guard = await (

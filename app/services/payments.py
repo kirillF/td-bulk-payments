@@ -5,6 +5,7 @@ from collections import defaultdict
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
+from app.core.logging import stage
 from app.core.observability import phase
 from app.models.payment import TransferPlan, TransferResult
 from app.schemas.payments import MAX_CENTS, BulkPayment, BulkPaymentResponse, PaymentCreated
@@ -57,30 +58,32 @@ async def insert_payments(
     connection: AsyncConnection[DictRow], request: BulkPayment, plan: TransferPlan
 ) -> BulkPaymentResponse:
     created = []
-    for payment in request.payments:
-        inserted = await (
-            await connection.execute(
-                """INSERT INTO payments (payer_firm_id, payee_firm_id, amount_cents, description)
-               VALUES (%s, %s, %s, %s) RETURNING id""",
-                (
-                    plan.payer_id,
-                    plan.payee_ids[str(payment.payee_firm_uuid)],
-                    payment.amount_cents,
-                    payment.description,
-                ),
+    for ordinal, payment in enumerate(request.payments, 1):
+        with stage("payments.insert", ordinal=ordinal):
+            inserted = await (
+                await connection.execute(
+                    """INSERT INTO payments
+                   (payer_firm_id, payee_firm_id, amount_cents, description)
+                   VALUES (%s, %s, %s, %s) RETURNING id""",
+                    (
+                        plan.payer_id,
+                        plan.payee_ids[str(payment.payee_firm_uuid)],
+                        payment.amount_cents,
+                        payment.description,
+                    ),
+                )
+            ).fetchone()
+            if inserted is None:
+                raise RuntimeError("payment insertion returned no ID")
+            created.append(
+                PaymentCreated(
+                    id=inserted["id"],
+                    payer_firm_uuid=request.payer_firm_uuid,
+                    payee_firm_uuid=payment.payee_firm_uuid,
+                    amount_cents=payment.amount_cents,
+                    description=payment.description,
+                )
             )
-        ).fetchone()
-        if inserted is None:
-            raise RuntimeError("payment insertion returned no ID")
-        created.append(
-            PaymentCreated(
-                id=inserted["id"],
-                payer_firm_uuid=request.payer_firm_uuid,
-                payee_firm_uuid=payment.payee_firm_uuid,
-                amount_cents=payment.amount_cents,
-                description=payment.description,
-            )
-        )
     return BulkPaymentResponse(
         payments_created=len(created), total_amount_cents=request.total_cents, payments=created
     )
@@ -95,11 +98,13 @@ class BulkPaymentService:
     ) -> TransferResult:
         with phase("firms.lock"):
             firms = await lock_firms(connection, request)
-        plan = plan_transfer(request, firms)
+        with stage("payments.plan"):
+            plan = plan_transfer(request, firms)
         if isinstance(plan, TransferResult):
             return plan
         # Every participant is already locked and every resulting balance validated.
         with phase("payments.persist"):
-            await apply_balances(connection, plan.balance_deltas)
+            with stage("payments.balances"):
+                await apply_balances(connection, plan.balance_deltas)
             response = await insert_payments(connection, request, plan)
         return TransferResult("accepted", response.model_dump(mode="json"))
