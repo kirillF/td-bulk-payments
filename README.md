@@ -1,63 +1,104 @@
 # Firm Payments
 
-Bulk firm payments with Python 3.15, FastAPI, Pydantic and PostgreSQL 17. Database
-access uses explicit parameterized SQL, without an ORM.
+Bulk payments between firms’ platform balances using Python 3.15, FastAPI, Pydantic
+and PostgreSQL 17. Persistence uses async psycopg/parameterized SQL without an application
+ORM; schema migrations use Alembic.
 
-The implementation provides atomic batches, durable idempotency, complete ordered payment
-IDs, indexed UUID lookup, configurable resource bounds and structured observability.
-Verification uses executable Gherkin and real PostgreSQL/container HTTP checks.
-The executable contract contains60 scenarios/106 expanded cases. Candidate-bound checks and independent review establish verification status; formal feature acceptance and external deployment remain separate decisions.
+## Approach and architecture
+
+Money uses integer US cents. The payer must cover the full batch: all payments and
+balance changes commit together or roll back.
+A unique UUID index supports lookups; ascending internal-ID row locks serialize competing
+transfers across instances and prevent lock-order deadlocks. Repeated payees retain separate
+payment rows with aggregated credits. All balance writers must follow this locking protocol.
+
+Pydantic schemas validate and normalize requests. Controllers handle HTTP and orchestrate
+services; the payment service checks the total debit and resulting credits before updating
+balances and inserting payments in one database transaction. CRUD owns SQL, while the
+database layer owns transactions, pooling and cleanup.
+
+| Location | Responsibility |
+| --- | --- |
+| `app/api/` | Versioned controllers, idempotency middleware, HTTP errors and route metadata |
+| `app/schemas/`, `app/models/` | Validation/normalization and domain records |
+| `app/services/` | Payment rules and supporting services |
+| `app/crud/` | Parameterized SQL; no transaction ownership |
+| `app/db/` | Queries, pool, transactions, deadlines and cleanup |
+| `app/core/` | Settings, context and observability |
+| `migrations/` | Versioned Alembic schema and legacy-data adoption |
+
+Async work has one absolute deadline, cleanup reserve and independent PostgreSQL timeouts.
+Pool/waiter limits are bounded; these settings are not a latency SLA.
 
 ## Run locally
+
+### Docker Compose
+
+Requires Docker with Compose:
 
 ```sh
 docker compose up --build
 ```
 
-Compose waits for PostgreSQL readiness, runs a one-shot repeat-safe schema bootstrap,
-then starts the non-root service on http://localhost:8000. The HTTP application shell is
-available at `/docs` and `/openapi.json`. Local ports bind to loopback. PostgreSQL data
-persists in a named volume. Credentials in Compose are development-only values.
-The Python/uv/PostgreSQL image manifests and Python dependency lock are pinned.
+Compose waits for PostgreSQL, runs Alembic, then starts the non-root service.
+HTTP: `127.0.0.1:8000`; PostgreSQL: `127.0.0.1:5432`.
+Open [Swagger UI](http://localhost:8000/docs) or [OpenAPI](http://localhost:8000/openapi.json).
+`compose.yaml` supplies development credentials and a persistent database volume.
 
-## Verify the current milestone
+### Python on the host
 
-With uv 0.13.1 and Docker available:
+With uv (CI: 0.13.1), create `.env` from [`.env.example`](.env.example), preserving existing
+settings. Start only PostgreSQL for the host-run service:
 
 ```sh
 uv sync --locked --all-groups --managed-python
-uv run --locked python scripts/check.py
+docker compose up -d postgres
+uv run --locked python -m app.db.migrate
+uv run --locked uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log --log-level critical
 ```
 
-Checks cover Python syntax, lock consistency, source formatting/lint, strict
-application/script typing, the registered requirement-linked Gherkin cases, concurrency/failure
-boundaries and real clean-image/Compose/HTTP tests. That test uses a
-fresh build context without a virtual environment, unique loopback ports and owned data
-volumes; it proves non-root Python 3.15 HTTP startup and bootstrap preservation of seeded
-balances. Missing Docker fails the check. Undefined future check groups fail explicitly.
-CI runs the complete application checks. Coordinator-only authority tests run separately
-against the selected external approval store, which CI/application containers never mount.
+Startup checks connectivity/revision; handlers never migrate. Drain old writers before
+upgrades. Incompatible schemas/destructive downgrades are rejected; do not blindly stamp revisions.
 
-The coordinator uses the approved [project-local policy](docs/harness/PROJECT_OVERRIDES.md)
-and `scripts/project_workflow.py` for candidate-bound audited evidence. Local approval
-records are not required for ordinary CI checks and are never copied into the image.
+## API and contracts
 
-## Payment design and example
+`POST /v1/bulk-payments` accepts JSON and requires `Idempotency-Key`.
+Idempotency is supported: retry the same payload/key to avoid duplicate transfers.
+Keys are case-sensitive, payer-scoped, and contain 1–128 visible ASCII characters without spaces.
 
-`POST /v1/bulk-payments` requires `Idempotency-Key`; see the [API contract](docs/features/bulk-payments/api.md).
-Accepted batches return 201 with count, exact total cents and the complete ordered
-`payments` list (`id`, payer/payee UUIDs, cents, description). Validation/business rejection
-returns 422, processing or conflicting payer/key reuse 409, and infrastructure failure 503 with
-`Retry-After: 1`. An uncertain commit can still have succeeded: retry the **same key**.
+```json
+{
+  "payer_firm_uuid": "3f1c9a2e-7b4d-4c1e-9a55-2d8e6f0b7c41",
+  "payments": [{
+    "amount": "1200.75",
+    "payee_firm_uuid": "8b2e4c71-0d3a-4f6e-b1c9-5a7d2e9f4c10",
+    "description": "Bookkeeping cleanup"
+  }]
+}
+```
 
-Amounts use exact integer cents. Middleware commits a processing claim before controller
-admission. The controller locks firms in ascending ID order and atomically commits
-payments, balances and a result receipt. Middleware then publishes the completed result
-in a separate transaction. Duplicates return processing409 until publication or bounded
-receipt recovery, then replay the same result. One pool serves successive checkouts.
-Repeated payees retain separate payment rows; credits are aggregated.
-Business declines are durable, malformed input reserves no key, and replay preserves IDs.
-All participating balance writers must cooperate with the locking protocol.
+- 1–1,000 payments; positive dollar **strings**, at most two decimal places/32 characters,
+  fitting 2,147,483,647 cents. Signs, whitespace, exponents and rounding are rejected.
+- Descriptions: up to 2,000 characters after removing null bytes and isolated Unicode
+  surrogates; other text is preserved. UUIDs/amounts are normalized.
+- Unknown fields, invalid UUIDs and self-payments are invalid. Unknown firms, insufficient
+  funds or balance overflow reject the whole batch.
+
+| Status | Meaning |
+| --- | --- |
+| `201` | Successful batch, including an idempotent replay |
+| `422` | Invalid input or durable business rejection; no monetary changes |
+| `409` | Request already processing or conflicting key reuse |
+| `503` | Service unavailable; retry the same payload/key after `Retry-After: 1` |
+
+A `201` body contains `payments_created`, `total_amount_cents` and ordered `payments`:
+`id`, `payer_firm_uuid`, `payee_firm_uuid`, `amount_cents`, `description`.
+IDs are database-generated.
+
+Optional `X-Correlation-ID`: 1–128 ASCII letters/digits/`._-`; invalid/duplicate values
+are replaced. Responses echo it and a fresh `X-Request-ID`, including on replay.
+
+### Try the supplied sample
 
 ```sh
 docker compose exec -T postgres psql -U firm_payments -d firm_payments < examples/firms.sql
@@ -67,93 +108,80 @@ curl -i http://localhost:8000/v1/bulk-payments \
   -H 'Idempotency-Key: example-1' --data-binary @examples/bulk-payment.json
 ```
 
-The supplied fresh seed yields Pinecrest $36,748.75, Lopez $1,700.75 and Nair $14,050.50.
-Seed insertion preserves existing UUID rows rather than resetting prior balances.
+Fresh-seed balances after the three-payment sample: Pinecrest $36,748.75, Lopez $1,700.75,
+Nair $14,050.50. Seeding preserves existing rows/balances.
+[Full API contract and response examples](docs/features/bulk-payments/api.md).
 
-## Operations and boundaries
+## Configuration and operation
 
-See [local operations](docs/operations.md) for bootstrap, shutdown and recovery. Schema
-bootstrap uses an advisory transaction lock and never changes existing balances; it is
-not an upgrade migration for an incompatible pre-existing schema. Every additional schema
-change requires a versioned data-migration decision.
+Pydantic `BaseSettings` validates startup configuration. Precedence: explicit settings >
+process environment > root `.env` > defaults. Dotenv values are literal (no interpolation);
+runtime `.env` files stay outside images/Git.
 
-This take-home trusts the request payer identity. Authentication, external payment rails,
-production capacity qualification and deployment are outside scope. All balance writers
-must cooperate with the documented database locking protocol. No publication or final
-feature acceptance is implied by a passing local check.
+| Setting | Purpose |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL connection URL |
+| `PAYMENTS_PROFILE` | `local` supplies development budgets; default `configured` requires explicit budgets |
+| `PAYMENTS_LOG_LEVEL` | `DEBUG`, `INFO` (default), `WARNING`, `ERROR` or `CRITICAL` |
+| `PAYMENTS_OTLP_ENDPOINT` | Optional OTLP HTTP trace receiver |
 
-## Configuration
+Other `PAYMENTS_*` settings bound connections, waiters and timeouts: see
+[settings](app/core/config.py) and [operations](docs/operations.md). Budget connections across
+all app/maintenance processes, including rollout overlap.
 
-Compose explicitly selects `PAYMENTS_PROFILE=local`. Other deployments default to
-`configured` and must supply `DATABASE_URL` plus all numeric budget variables listed in
-[code design](docs/features/bulk-payments/code-design.md). Names use `PAYMENTS_`, such as
-`PAYMENTS_DB_CONNECTION_BUDGET`, `PAYMENTS_MAX_PROCESSES`, `PAYMENTS_POOL_MAX` and
-`PAYMENTS_OPERATION_BUDGET_MS`. Invalid budgets fail startup. The local C=8/P=2,
-pool-max=4 profile is an illustrative developer setting, not a capacity or latency SLA.
-
-`GET /health/live` and `/metrics` do not query PostgreSQL. `/health/ready` checks pool/DB
-availability within its configured probe/SQL bounds. JSON logs use server request IDs and
-safe W3C trace correlation; financial payloads, keys, SQL and raw driver errors are omitted.
-See [operations](docs/operations.md) for optional bounded OTLP export and recovery.
-
-Payment and readiness database I/O runs asynchronously on the app-owned event loop. Each payment has one absolute asyncio timeout budget from pool acquisition through commit; the configured margin reserves bounded cleanup and response work. Expired operations discard their connection before task cancellation, and commit uncertainty is resolved by replaying the same idempotency key.
-
-Configuration is validated by `pydantic-settings.BaseSettings`, with literal `python-dotenv` defaults: copy `.env.example` to `.env` for local startup
-(the repository includes an ignored local-only `.env` when none existed). Values in
-the process environment override the file. Values are literal, without `${...}`
-interpolation. Startup and `python -m app.db.migrate` share the same loader.
-Deployment must supply its configured budgets; `.env` and `.env.*` stay out of images
-and Git, while `.env.example` is a tracked template.
-
-The service entry point is `app.main:app`. Payment requests use
-`POST /v1/bulk-payments`; the old unversioned path returns404. Health and metrics
-retain their existing root paths. Pydantic validation lives in `app/schemas`, plain
-domain records in `app/models`, and `BulkPaymentService` in `app/services/payments.py`.
-Idempotency is a separate service, and `app/db` owns transactions and timeout cleanup.
-
-Schema changes use Alembic revisions. Run `uv run --locked alembic upgrade head`
-(or `uv run --locked python -m app.db.migrate`) before service startup. The image
-includes `alembic.ini` and `migrations/`; its one-shot Compose migration finishes
-before the HTTP service starts. Application SQL remains psycopg with no ORM.
-Initial downgrade is intentionally unsupported because it would remove financial data.
-
-A compatible database created by the former bootstrap can be adopted without changing
-its financial records or sequence state. Partial or incompatible application schemas
-are rejected; do not bypass this with an unconditional `alembic stamp`. Concurrent
-upgrades serialize before version inspection and fail on the finite migration lock bound.
-
-Startup checks connectivity and the packaged Alembic head; migrations own schema integrity. Missing,
-older or unknown revision state prevents the service from serving requests; run the
-approved upgrade first. Migration execution never occurs inside a payment handler.
-
-
-Settings load once during application startup. Explicit settings and test mappings are
-isolated from ambient environment/dotenv; normal constructor values take precedence over
-process environment, which takes precedence over the literal local file. Unknown log
-levels, invalid numeric fields and inconsistent budgets fail safely before serving.
-`PAYMENTS_LOG_LEVEL` accepts DEBUG, INFO (default), WARNING, ERROR or CRITICAL.
-
-`PAYMENTS_POOL_MAX` bounds one pool per process, serving successive lifecycle and
-business transactions. Physical connections may be reused; no lifecycle partition setting
-is required. Native queue limits apply to every checkout. Include every process and
-maintenance command in the deployment connection budget. Startup does not detect manual
-schema drift with an unchanged Alembic revision; manage schema through migrations.
-
-Operational logs use the dedicated `firm_payments` JSON logger. `X-Correlation-ID` accepts
-one 1–128 character ASCII letters/digits/dot/underscore/hyphen token; malformed or duplicate
-values are replaced. Every application HTTP response returns it and a fresh `X-Request-ID`.
-`PAYMENTS_LOG_LEVEL=INFO` records request arrival/status and classified failures; `DEBUG`
-adds bounded stage and insert-ordinal events. Financial payloads and raw errors are excluded.
-
-Idempotency responses are retained for exactly24 hours from completed publication using
-PostgreSQL time; replay does not extend expiry. A safely expired key can execute a new
-payment. Unresolved/active processing entries cannot be reclaimed from age alone.
-For bounded receipt reconciliation and expired-key cleanup, run explicitly:
+- `GET /health/live`: liveness without database I/O.
+- `GET /health/ready`: bounded database availability check; `200` or `503`.
+- `GET /metrics`: process-local Prometheus metrics, without financial SQL.
+- `firm_payments` JSON logs: INFO arrival/completion and classified failures; DEBUG stages.
+  Request/correlation/trace context crosses layers. Payloads, keys, credentials, SQL and raw
+  errors are excluded. Bounded queues/export expose telemetry drops.
 
 ```sh
-python -m app.db.idempotency_maintenance --batch-size 100 --max-batches 10 --timeout-seconds 10
+docker compose ps
+docker compose logs -f migrate service
+docker compose down
 ```
 
-The command never executes payments. It publishes committed receipts, fences abandoned
-claims with no effects, skips busy guards and retains corrupt records with a nonzero exit.
-Its numeric arguments are operator-selected bounds, not throughput guarantees.
+`down` preserves database data. Optional bounded request-record maintenance:
+
+```sh
+docker compose run --rm --no-deps service /app/.venv/bin/python \
+  -m app.db.idempotency_maintenance --batch-size 100 --max-batches 10 --timeout-seconds 10
+```
+
+Maintenance never executes payments; unresolved corruption returns a nonzero exit.
+
+## Tests
+
+With dev dependencies installed and Docker running:
+
+```sh
+uv run --locked python scripts/check.py
+```
+
+CI runs lock/Ruff/mypy checks, unit tests, PostgreSQL Testcontainers tests and isolated
+Compose/HTTP tests. Coverage includes actual contention, atomicity, idempotency/recovery/TTL,
+migrations, cancellation/failures and telemetry. Missing Docker fails verification.
+
+Focused examples:
+
+```sh
+uv run --locked pytest -q tests/test_models.py
+uv run --locked pytest -q tests/test_idempotency.py
+uv run --locked pytest -q tests/test_journeys.py --scenarios=SC-21
+```
+
+The [Gherkin contract](tests/features/bulk_payments.feature) has 60 scenarios / 106 cases.
+Harness authority tests run separately.
+
+## Scope and known issues
+
+Payer identity is trusted; authentication, external payment rails and production qualification
+are outside this take-home. Deferred issues:
+
+- Cancellation arriving during cleanup can be suppressed.
+- Failed result publication can undercount acknowledged payments in metrics.
+- The phase-retention cap can omit the main business transaction timing.
+
+One earlier clean-image check reported a missing `payments` table; subsequent checks passed,
+but its cause remains unresolved. Metrics are best effort, not the financial ledger.
