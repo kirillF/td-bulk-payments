@@ -1,5 +1,6 @@
 """Validation of durable result envelopes, independent of request execution."""
 
+import json
 from typing import Any
 
 from pydantic import ValidationError
@@ -37,3 +38,31 @@ def validate_result(status: int, body: Any, request: BulkPayment | None = None) 
     except (ValidationError, TypeError, ValueError) as error:
         raise StoredResultInvalid("stored result is invalid") from error
     raise StoredResultInvalid("stored result is incomplete")
+
+
+def prepare_request(body: bytes, keys: list[str]) -> tuple[BulkPayment, str]:
+    """Validate protocol inputs once, retaining safe HTTP error locations."""
+    from fastapi.exceptions import RequestValidationError
+
+    from app.schemas.headers import IdempotencyHeaders
+
+    try:
+        header = IdempotencyHeaders(keys=keys)
+    except ValidationError as error:
+        raise RequestValidationError(
+            [
+                {**item, "loc": ("header", "Idempotency-Key", *item["loc"][1:])}
+                for item in error.errors()
+            ]
+        ) from None
+    try:
+        request = BulkPayment.model_validate(json.loads(body))
+    except ValidationError as error:
+        raise RequestValidationError(
+            [{**item, "loc": ("body", *item["loc"])} for item in error.errors()]
+        ) from None
+    except json.JSONDecodeError, UnicodeDecodeError:
+        raise RequestValidationError(
+            [{"loc": ("body",), "msg": "Invalid JSON", "type": "json_invalid"}]
+        ) from None
+    return request, header.keys[0]

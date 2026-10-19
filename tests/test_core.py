@@ -68,7 +68,10 @@ def test_description_sanitization_is_durable_and_idempotent(
 
 def test_sc21_exact_sample(application, seeded_database):
     with psycopg.connect(seeded_database) as connection:
-        connection.execute("TRUNCATE payments, bulk_payment_requests, firms RESTART IDENTITY")
+        connection.execute(
+            "TRUNCATE request_result_receipts, request_execution_guards, "
+            "payments, bulk_payment_requests, firms RESTART IDENTITY"
+        )
         connection.execute((Path(__file__).resolve().parents[1] / "examples/firms.sql").read_text())
     body = json.loads(
         (Path(__file__).resolve().parents[1] / "examples/bulk-payment.json").read_text()

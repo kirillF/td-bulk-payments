@@ -179,6 +179,10 @@ app/services/idempotency.py
 app/services/payments.py
 app/db/idempotency.py
 app/db/database.py
+tests/test_health.py
+docs/features/bulk-payments/feature.json
+docs/features/bulk-payments/slices.md
+tests/test_migrations.py
 tests/test_idempotency.py
 tests/test_payments.py
 tests/test_core.py

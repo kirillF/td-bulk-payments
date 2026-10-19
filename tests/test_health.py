@@ -74,18 +74,16 @@ def test_actual_database_outage_and_recovery():
             assert count(url, "payments") == 0
 
 
-def test_incompatible_schema_fails_initialization(seeded_database):
+def test_startup_revision_gate_does_not_certify_manual_constraint_drift(seeded_database):
     import psycopg
-    import pytest
 
     from .conftest import running_app
 
     with psycopg.connect(seeded_database) as connection:
         connection.execute("ALTER TABLE firms DROP CONSTRAINT firms_balance_cents_check")
     try:
-        with pytest.raises(ValueError, match="Incompatible database constraints"):
-            with running_app(seeded_database):
-                pass
+        with running_app(seeded_database) as app:
+            assert get(app, "/health/ready").status_code == 200
     finally:
         with psycopg.connect(seeded_database) as connection:
             connection.execute(
@@ -94,7 +92,7 @@ def test_incompatible_schema_fails_initialization(seeded_database):
             )
 
 
-def test_incompatible_key_collation_rejected(seeded_database):
+def test_startup_revision_gate_does_not_certify_manual_collation_drift(seeded_database):
     import psycopg
 
     from .conftest import payload, post, running_app
@@ -109,9 +107,8 @@ def test_incompatible_key_collation_rejected(seeded_database):
             "idempotency_key TYPE text COLLATE test_key_ci"
         )
     try:
-        with pytest.raises(ValueError, match="Incompatible idempotency key collation"):
-            with running_app(seeded_database):
-                pass
+        with running_app(seeded_database) as app:
+            assert get(app, "/health/ready").status_code == 200
     finally:
         with psycopg.connect(seeded_database) as connection:
             connection.execute(

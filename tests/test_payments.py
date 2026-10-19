@@ -218,7 +218,10 @@ def test_parallel_idempotency_and_spending_across_instances(application, seeded_
         assert application.state.pool is not second.state.pool
         for identical in [True, False]:
             with psycopg.connect(seeded_database) as connection:
-                connection.execute("TRUNCATE payments, bulk_payment_requests")
+                connection.execute(
+                    "TRUNCATE request_result_receipts, request_execution_guards, "
+                    "payments, bulk_payment_requests"
+                )
                 connection.execute(
                     "UPDATE firms SET balance_cents = CASE WHEN uuid = %s THEN 10000 ELSE 0 END",
                     (PAYER,),
@@ -235,14 +238,20 @@ def test_parallel_idempotency_and_spending_across_instances(application, seeded_
                 with ThreadPoolExecutor(max_workers=8) as executor:
                     futures = [executor.submit(submit, i) for i in range(8)]
                     try:
-                        wait_for_blocked_requests(seeded_database, 8)
+                        wait_for_blocked_requests(seeded_database, 1 if identical else 8)
                     finally:
                         blocker.commit()
                     results = [future.result(timeout=15) for future in futures]
             statuses = [r.status_code for r in results]
             if identical:
-                assert statuses == [201] * 8
-                assert len({r.json()["payments"][0]["id"] for r in results}) == 1
+                assert statuses.count(201) == 1 and statuses.count(409) == 7
+                assert all(
+                    r.json() == {"detail": "request_processing"}
+                    for r in results
+                    if r.status_code == 409
+                )
+                replay = post(application, payload("30"), "same")
+                assert replay.json() == next(r.json() for r in results if r.status_code == 201)
                 assert count(seeded_database, "payments") == 1
                 assert balances(seeded_database) == {PAYER: 7000, PAYEE: 3000, OTHER: 0}
             else:

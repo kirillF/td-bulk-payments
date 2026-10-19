@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.middleware.idempotency import idempotency_middleware
 from app.api.router import install_routes
 from app.core.config import Settings
 from app.core.observability import RequestTelemetryMiddleware, Telemetry
@@ -41,6 +42,7 @@ def create_app(configuration: Settings | str | None = None) -> FastAPI:
 
     application = FastAPI(title="Firm Payments", version="0.1.0", lifespan=lifespan)
 
+    application.middleware("http")(idempotency_middleware)
     application.add_middleware(RequestTelemetryMiddleware, owner=application)
     install_routes(application)
     return application

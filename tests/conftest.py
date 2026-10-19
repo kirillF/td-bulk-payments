@@ -165,3 +165,12 @@ def pytest_collection_modifyitems(config: Any, items: list[Any]) -> None:
         raise pytest.UsageError("Missing scenario bindings: " + str(selected - found))
     items[:] = kept
     config.hook.pytest_deselected(items=deselected)
+
+
+async def async_post(app, body, key):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        return await client.post(
+            "/v1/bulk-payments", json=body.model_dump(mode="json"), headers={"Idempotency-Key": key}
+        )

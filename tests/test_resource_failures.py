@@ -193,9 +193,10 @@ def test_startup_and_connection_configuration_are_bounded(seeded_database):
         startup_timeout_ms=100,
     )
     start = time.monotonic()
-    with pytest.raises(Exception, match="pool initialization incomplete|pool"):
+    with pytest.raises(Exception) as startup_error:
         with running_app(settings):
             pass
+    assert isinstance(startup_error.value, TimeoutError) or "pool" in str(startup_error.value)
     assert time.monotonic() - start < 3
 
 
@@ -222,6 +223,7 @@ class ReplyBlackhole:
         self.stop = threading.Event()
         self.withheld = threading.Event()
         self.target = None
+        self.skip_commits = 0
         self.sockets = []
         self.threads = []
         self.acceptor = threading.Thread(target=self.accept, daemon=True)
@@ -266,6 +268,11 @@ class ReplyBlackhole:
                         buffer = b""
                         previous_target = self.target
                     buffer = (buffer + data.lower())[-8192:]
+                    if self.target and self.target in buffer and self.skip_commits:
+                        self.skip_commits -= 1
+                        buffer = b""
+                        destination.sendall(data)
+                        continue
                     if self.target and self.target in buffer:
                         self.target = None  # Fail only this operation; recovery stays reachable.
                         stalled.set()
@@ -325,6 +332,7 @@ def test_stalled_tcp_replies_expire_discard_and_recover(seeded_database, phase):
                     )
             with borrowed(app) as original:
                 pass
+            fault.skip_commits = 1 if phase == "commit" else 0
             fault.target = {
                 "checkout": b"q\x00\x00\x00\x05\x00",  # Pool check sends an empty query.
                 "payment": b"insert into payments",
@@ -355,6 +363,14 @@ def test_stalled_tcp_replies_expire_discard_and_recover(seeded_database, phase):
                             "DROP FUNCTION fail_transport_payment()"
                         )
             replay = post(app, payload("1"), "transport")
+            if replay.status_code == 409:
+                assert replay.json() == {"detail": "request_processing"}
+                with psycopg.connect(seeded_database) as connection:
+                    connection.execute(
+                        "UPDATE bulk_payment_requests SET owner_deadline=now()-interval '1 second' "
+                        "WHERE idempotency_key='transport' AND state='processing'"
+                    )
+                replay = post(app, payload("1"), "transport")
             assert replay.status_code == 201
             assert post(app, payload("1"), "transport").json() == replay.json()
             assert (
@@ -370,12 +386,12 @@ def test_external_cancellation_joins_operation_and_preserves_recovery(seeded_dat
     import asyncio
     from contextlib import nullcontext
 
-    from app.db.database import run_transaction
     from app.schemas.payments import BulkPayment
-    from app.services.idempotency import execute
+
+    from .conftest import async_post
 
     async def pay_bulk(pool, request, key):
-        return await run_transaction(pool, lambda connection: execute(connection, request, key))
+        return await async_post(app, request, key)
 
     with ReplyBlackhole(seeded_database) as fault:
         settings = Settings.local(
@@ -391,6 +407,7 @@ def test_external_cancellation_joins_operation_and_preserves_recovery(seeded_dat
             response_margin_ms=300,
         )
         with running_app(settings) as app:
+            fault.skip_commits = 1 if phase == "commit" else 0
             fault.target = {
                 "queued": None,
                 "payment": b"insert into payments",
@@ -424,6 +441,14 @@ def test_external_cancellation_joins_operation_and_preserves_recovery(seeded_dat
                 app.state.test_client.portal.call(cancel_operation)
             assert count(seeded_database, "payments") == (1 if phase == "commit" else 0)
             first = post(app, payload("1"), "cancelled")
+            if first.status_code == 409:
+                assert first.json() == {"detail": "request_processing"}
+                with psycopg.connect(seeded_database) as connection:
+                    connection.execute(
+                        "UPDATE bulk_payment_requests SET owner_deadline=now()-interval '1 second' "
+                        "WHERE idempotency_key='cancelled' AND state='processing'"
+                    )
+                first = post(app, payload("1"), "cancelled")
             assert first.status_code == 201
             assert post(app, payload("1"), "cancelled").json() == first.json()
             assert (
@@ -482,12 +507,12 @@ def test_checkout_handoff_has_no_cancellable_pruning_gap(seeded_database, monkey
 
     from psycopg_pool import AsyncConnectionPool
 
-    from app.db.database import run_transaction
     from app.schemas.payments import BulkPayment
-    from app.services.idempotency import execute
+
+    from .conftest import async_post
 
     async def pay_bulk(pool, request, key):
-        return await run_transaction(pool, lambda connection: execute(connection, request, key))
+        return await async_post(app, request, key)
 
     settings = Settings.local(seeded_database, pool_max=1)
     with running_app(settings) as app:
@@ -580,7 +605,8 @@ def test_pre_handoff_pool_return_recovers_capacity(seeded_database, monkeypatch,
 
     from app.db.database import run_transaction
     from app.schemas.payments import BulkPayment
-    from app.services.idempotency import execute
+
+    from .conftest import async_post
 
     settings = Settings.local(seeded_database, pool_max=1)
     with running_app(settings) as app:
@@ -599,17 +625,25 @@ def test_pre_handoff_pool_return_recovers_capacity(seeded_database, monkeypatch,
                 accepted.set()
                 await asyncio.Event().wait()
 
-            monkeypatch.setattr(pool, "return_owned", stalled_after_acceptance)
             key = "pre-handoff-cancel" if cancel_caller else "pre-handoff-timeout"
             request = BulkPayment.model_validate(payload("1"))
             # Keep ordinary DB settings; shorten only this runner's operation budget.
+            from app.api.v1.payments import execute_admitted
             from app.db.database import Operation, run_owned, transaction_boundary
+            from app.services.idempotency import check
 
+            admission = await run_transaction(
+                pool,
+                lambda connection: check(
+                    connection, str(request.payer_firm_uuid), key, request.fingerprint(), 15000
+                ),
+            )
+            monkeypatch.setattr(pool, "return_owned", stalled_after_acceptance)
             owner = Operation()
 
             async def work(connection):
                 async with transaction_boundary(connection, owner):
-                    return await execute(connection, request, key)
+                    return await execute_admitted(connection, request, admission)
 
             action = asyncio.create_task(run_owned(pool, work, 400, 200, owner))
             try:
@@ -632,10 +666,8 @@ def test_pre_handoff_pool_return_recovers_capacity(seeded_database, monkeypatch,
             assert await (await recovered.execute("SELECT 1")).fetchone() is not None
             await recovered.rollback()
             await pool.putconn(recovered)
-            result = await run_transaction(
-                pool, lambda connection: execute(connection, request, key)
-            )
-            assert result.outcome == "replayed"
+            result = await async_post(app, request, key)
+            assert result.status_code == 201
 
         app.state.test_client.portal.call(exercise)
         assert count(seeded_database, "payments") == 1

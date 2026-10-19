@@ -223,7 +223,7 @@ def main() -> None:
                 "pytest",
                 "-q",
                 "tests/test_journeys.py",
-                "--scenarios=SC-7,SC-8,SC-9,SC-10,SC-16",
+                "--scenarios=SC-7,SC-8,SC-9,SC-10,SC-16,SC-48,SC-49,SC-50,SC-57",
             ],
             cwd=ROOT,
             check=True,

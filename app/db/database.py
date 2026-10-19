@@ -4,6 +4,7 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +17,20 @@ from psycopg_pool.pool_async import ReturnConnection
 
 from app.core.config import Settings
 from app.core.observability import CURRENT, attempt_result, phase
+
+OPERATION_END: ContextVar[float | None] = ContextVar("payment_operation_end", default=None)
+
+
+@asynccontextmanager
+async def operation_scope(pool: Pool) -> AsyncIterator[None]:
+    """One absolute budget shared by every sequential checkout in a request."""
+    end = asyncio.get_running_loop().time() + pool.settings.operation_budget_ms / 1000
+    token = OPERATION_END.set(end)
+    try:
+        async with asyncio.timeout_at(end):
+            yield
+    finally:
+        OPERATION_END.reset(token)
 
 
 @dataclass
@@ -71,7 +86,7 @@ async def run_owned[T](
     """One supervised child; discard its session before injecting cancellation."""
     owner = operation or Operation()
     loop = asyncio.get_running_loop()
-    end = loop.time() + budget_ms / 1000
+    end = min(loop.time() + budget_ms / 1000, OPERATION_END.get() or float("inf"))
     work_deadline = end - min(reserve_ms, budget_ms / 2) / 1000
 
     async def execute() -> T:

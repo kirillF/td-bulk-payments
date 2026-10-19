@@ -612,12 +612,12 @@ def migration_then(ctx, step):
         assert all(not rows for rows in state(ctx.migration_url)["rows"].values())
     elif step == "all original records, balances and generated identities are preserved":
         actual = state(ctx.migration_url)
-        assert actual["rows"] == ctx.migration_before["rows"]
+        assert legacy_rows(actual) == legacy_rows(ctx.migration_before)
         assert actual["sequences"] == ctx.migration_before["sequences"]
     elif step == "neither its partial schema changes nor its new revision are committed":
         assert state(ctx.migration_url) == ctx.migration_before
     elif step == "previously committed financial and request records are preserved":
-        assert state(ctx.migration_url)["rows"] == ctx.migration_before["rows"]
+        assert legacy_rows(state(ctx.migration_url)) == legacy_rows(ctx.migration_before)
     elif step == "the downgrade is rejected before changing application data or revision":
         assert state(ctx.migration_url) == ctx.migration_before
     else:
@@ -634,8 +634,10 @@ def legacy_database(url):
 
 
 def preserved(actual, before):
-    for key in ["rows", "sequences", "schema"]:
-        assert actual[key] == before[key]
+    assert legacy_rows(actual) == legacy_rows(before)
+    assert actual["sequences"] == before["sequences"]
+    for original_objects, current_objects in zip(before["schema"], actual["schema"], strict=True):
+        assert set(original_objects) <= set(current_objects)
 
 
 def verify_replay(url, body, expected):
@@ -901,3 +903,10 @@ def test_startup_uses_revision_gate_and_migrations_enforce_integrity(database_ur
                     "INSERT INTO firms (name,balance_cents,uuid) VALUES ('duplicate',0,%s)",
                     (firm_uuid,),
                 )
+
+
+def legacy_rows(snapshot):
+    return {
+        name: [row[:6] if name == "bulk_payment_requests" else row for row in rows]
+        for name, rows in snapshot["rows"].items()
+    }

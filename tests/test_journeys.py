@@ -89,6 +89,11 @@ def change_balances(ctx, values):
 
 @given(parsers.re(r"(?P<step>.+)"))
 def arrange(step, ctx, docstring=None):
+    from .test_idempotency import lifecycle_step
+
+    if lifecycle_step(ctx, step, "given"):
+        return
+
     from .test_settings import settings_given
 
     if settings_given(ctx, step):
@@ -225,7 +230,10 @@ def arrange(step, ctx, docstring=None):
         step == "the firms table is seeded with these exact rows replacing the background balances:"
     ):
         with psycopg.connect(ctx.db) as c:
-            c.execute("TRUNCATE payments,bulk_payment_requests,firms RESTART IDENTITY")
+            c.execute(
+                "TRUNCATE request_result_receipts,request_execution_guards,"
+                "payments,bulk_payment_requests,firms RESTART IDENTITY"
+            )
             c.execute(docstring)
     elif step == "no payments have been persisted":
         assert count(ctx.db, "payments") == 0
@@ -273,6 +281,11 @@ def arrange(step, ctx, docstring=None):
 
 @when(parsers.re(r"(?P<step>.+)"))
 def act(step, ctx, docstring=None):
+    from .test_idempotency import lifecycle_step
+
+    if lifecycle_step(ctx, step, "when"):
+        return
+
     from .test_settings import settings_when
 
     if settings_when(ctx, step):
@@ -409,7 +422,7 @@ def act(step, ctx, docstring=None):
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                 futures = [executor.submit(submit, i) for i in range(8)]
                 try:
-                    wait_for_blocked_requests(ctx.db, 8)
+                    wait_for_blocked_requests(ctx.db, 1 if identical else 8)
                 finally:
                     blocker.commit()
                 ctx.results = [f.result(timeout=10) for f in futures]
@@ -501,7 +514,6 @@ def act(step, ctx, docstring=None):
             cwd=ctx.fresh,
             env=env,
             check=True,
-            capture_output=True,
             timeout=120,
         )
         missing = subprocess.run(
@@ -543,6 +555,11 @@ def act(step, ctx, docstring=None):
 
 @then(parsers.re(r"(?P<step>.+)"))
 def verify(step, ctx, datatable=None):
+    from .test_idempotency import lifecycle_step
+
+    if lifecycle_step(ctx, step, "then"):
+        return
+
     from .test_settings import settings_then
 
     if settings_then(ctx, step):
@@ -558,6 +575,46 @@ def verify(step, ctx, datatable=None):
         assert balances(ctx.db) == ctx.before
         assert count(ctx.db, "payments") == count(ctx.db, "bulk_payment_requests") == 0
         return
+    if step == "no payments, balance changes or committed result receipt remain":
+        assert balances(ctx.db) == ctx.before
+        assert count(ctx.db, "payments") == 0
+        with psycopg.connect(ctx.db) as connection:
+            assert (
+                connection.execute("SELECT count(*) FROM request_result_receipts").fetchone()[0]
+                == 0
+            )
+        return
+    if step == "one admitted request returns 201 and duplicates observing processing return 409":
+        assert sum(r.status_code == 201 for r in ctx.results) == 1
+        assert sum(r.status_code == 409 for r in ctx.results) == 7
+        return
+    if (
+        step == "identical retries after completed publication replay the same 201 result "
+        "and persisted payment ID"
+    ):
+        winner = next(r for r in ctx.results if r.status_code == 201)
+        assert post(ctx.app, payload("30"), "K").json() == winner.json()
+        return
+    if step == "bounded cleanup or reconciliation releases the abandoned claim before retry":
+        with psycopg.connect(ctx.db) as connection:
+            assert connection.execute(
+                "SELECT count(*) FROM request_result_receipts"
+            ).fetchone() == (0,)
+        return
+    if step == "bounded reconciliation publishes the committed receipt if necessary":
+        with psycopg.connect(ctx.db) as connection:
+            assert connection.execute(
+                "SELECT state FROM bulk_payment_requests WHERE idempotency_key=%s",
+                (ctx.key,),
+            ).fetchone() == ("completed",)
+        return
+    if step == "the original 201 result is replayed after any temporary processing 409":
+        assert ctx.response.status_code == 201 and ctx.response.json() == ctx.first.json()
+        return
+    if step == "only the original batch's payment and balance effects exist":
+        assert count(ctx.db, "payments") == len(ctx.first.json()["payments"])
+        assert balances(ctx.db)[PAYER] == ctx.before[PAYER] - ctx.first.json()["total_amount_cents"]
+        return
     if step == "liveness completes while the payment operation is still waiting":
         assert ctx.liveness.status_code == 200 and ctx.waiting_when_live_completed
         return
@@ -571,6 +628,14 @@ def verify(step, ctx, datatable=None):
         assert ctx.app.state.pool.get_stats().get("requests_waiting", 0) == 0
         return
     if step == "same-key recovery creates or replays exactly one committed batch":
+        with psycopg.connect(ctx.db, autocommit=True) as connection:
+            end = time.monotonic() + 1
+            while not connection.execute(
+                "SELECT COALESCE(bool_and(owner_deadline<=clock_timestamp()),true) "
+                "FROM bulk_payment_requests WHERE state='processing'"
+            ).fetchone()[0]:
+                assert time.monotonic() < end
+                time.sleep(0.01)
         first = post(ctx.app, payload("1"), ctx.key)
         assert first.status_code == 201
         assert post(ctx.app, payload("1"), ctx.key).json() == first.json()

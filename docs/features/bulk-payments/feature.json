@@ -852,7 +852,11 @@
         "scripts/harness_checks.py",
         "tests/test_journeys.py",
         "tests/features/bulk_payments.feature",
-        "tests/conftest.py"
+        "tests/conftest.py",
+        "tests/test_migrations.py",
+        "tests/test_health.py",
+        "docs/features/bulk-payments/feature.json",
+        "docs/features/bulk-payments/slices.md"
       ],
       "requirements": [
         "FR-1",
