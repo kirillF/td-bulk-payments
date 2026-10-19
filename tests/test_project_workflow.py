@@ -132,6 +132,24 @@ def test_lifecycle_rejects_wrong_preimage_and_standards_binding():
         workflow.lifecycle_design_overrides(feature, prior)
 
 
+def test_continuation_preserves_original_deadline_and_cannot_expand_allowance():
+    import copy
+
+    state = json.loads((workflow.STATE / "feature-state.json").read_text())
+    task = "lifecycle-container-migration"
+    original = state["attempts"][task]["deadline_epoch"]
+    assert workflow.lifecycle_deadline(state, task) > original
+    assert state["attempts"][task]["deadline_epoch"] == original
+    altered = copy.deepcopy(state)
+    altered["attempts"][task]["continuations"][0]["deadline_epoch"] += 1
+    with pytest.raises(ValueError, match="allowance"):
+        workflow.lifecycle_deadline(altered, task)
+    altered = copy.deepcopy(state)
+    altered["attempts"][task]["deadline_epoch"] += 1
+    with pytest.raises(ValueError, match="history"):
+        workflow.lifecycle_deadline(altered, task)
+
+
 def test_description_amendment_checks_exact_postimages_and_original_chain(tmp_path, monkeypatch):
     directory = tmp_path / ".harness/project-local-workflow/description-sanitization-amendment"
     directory.mkdir(parents=True)

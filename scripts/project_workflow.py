@@ -190,13 +190,7 @@ def environment() -> dict[str, Any]:
 def check(group: str) -> Path:
     policy()
     commands = {
-        "baseline-syntax": [
-            sys.executable,
-            "-c",
-            "import ast; from pathlib import Path; "
-            "[ast.parse(p.read_text(), filename=str(p)) for root in "
-            '(Path("app"), Path("scripts")) for p in root.rglob("*.py")]',
-        ],
+        "baseline-syntax": [sys.executable, "scripts/harness_checks.py", "baseline-syntax"],
         "quality": [sys.executable, "scripts/harness_checks.py", "quality"],
         "container-boot": [sys.executable, "scripts/harness_checks.py", "container-boot"],
         "money-unit": [sys.executable, "scripts/harness_checks.py", "money-unit"],
@@ -213,7 +207,6 @@ def check(group: str) -> Path:
             "pytest",
             "-q",
             "tests/test_project_workflow.py",
-            "tests/test_local_qualification.py",
         ],
         "qualify-local": [sys.executable, "scripts/qualify_local.py", "exercise"],
         "qualify-local-negative": [sys.executable, "scripts/qualify_local.py", "negative"],
@@ -221,6 +214,8 @@ def check(group: str) -> Path:
     if group not in commands:
         raise ValueError("Check group is not implemented; no placeholder PASS")
     if group in {
+        "baseline-syntax",
+        "local-policy",
         "quality",
         "container-boot",
         "money-unit",
@@ -243,6 +238,10 @@ def check(group: str) -> Path:
             if task not in tasks:
                 raise ValueError("Unknown lifecycle task")
             authority = dict(authority, tasks=tasks)
+            definitions = {entry["id"]: entry for entry in contract["check_definitions"]}
+            commands[group] = list(definitions[group]["argv"])
+            if commands[group][0] == "python3":
+                commands[group][0] = sys.executable
         if state.get("status") == "ALEMBIC_IMPLEMENTING":
             if state.get("aligned_alembic_approval_sha256") != ALIGNED_ALEMBIC_AMENDMENT:
                 raise ValueError("Unknown aligned Alembic attempt")
@@ -262,6 +261,8 @@ def check(group: str) -> Path:
         if group not in authority["tasks"][task]["checks"]:
             raise ValueError("Check is not part of the current approved slice")
         deadline = state["attempts"][task]["deadline_epoch"]
+        if state.get("status") == "LIFECYCLE_IMPLEMENTING":
+            deadline = lifecycle_deadline(state, task)
         if state.get("status") == "VERSIONED_IMPLEMENTING":
             attempt = state["versioned_attempt"]
             if attempt["approval_sha256"] != VERSIONED_AMENDMENT:
@@ -564,6 +565,39 @@ def aligned_alembic_overrides(feature: dict[str, Any], prior: dict[str, str]) ->
 
 LIFECYCLE_AMENDMENT = "beb372ab543562b93fe9bffa3d7a951f5f5ffafba5a992240d55a44557cf6053"
 STANDARDS_AMENDMENT = "12bf57961f7363d83f3e45ec5e3698cbc9ea6587fce3757cac5fd45454122bc9"
+MIGRATION_CONTINUATION = "c666bedd1503b152a08b51737320c2c0c9a41ee26ec48605f41d25f1aaaa8e53"
+
+
+def lifecycle_deadline(state: dict[str, Any], task: str) -> float:
+    attempt = state["attempts"][task]
+    continuations = attempt.get("continuations", [])
+    if not continuations:
+        return float(attempt["deadline_epoch"])
+    if task != "lifecycle-container-migration" or len(continuations) != 1:
+        raise ValueError("Unapproved lifecycle continuation")
+    extension = continuations[0]
+    if extension["approval_sha256"] != MIGRATION_CONTINUATION:
+        raise ValueError("Unknown continuation authority")
+    value = approval(
+        STORE / f"{MIGRATION_CONTINUATION}.payload.json",
+        {
+            "purpose": "project-local-lifecycle-migration-continuation-v1",
+            "project": str(ROOT),
+            "task": task,
+            "parent_implementation_approval_sha256": LIFECYCLE_AMENDMENT,
+        },
+    )
+    for name, expected in value["artifacts"].items():
+        if digest(Path(name).read_bytes()) != expected:
+            raise ValueError("Continuation artifact changed")
+    if (
+        attempt["deadline_epoch"] != value["original_deadline_epoch"]
+        or attempt["started_epoch"] != value["original_started_epoch"]
+        or extension["started_epoch"] < attempt["deadline_epoch"]
+        or extension["deadline_epoch"] - extension["started_epoch"] != value["additional_seconds"]
+    ):
+        raise ValueError("Continuation changed original history or allowance")
+    return float(extension["deadline_epoch"])
 
 
 def lifecycle_design_overrides(feature: dict[str, Any], prior: dict[str, str]) -> dict[str, str]:
