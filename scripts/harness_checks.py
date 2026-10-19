@@ -296,6 +296,7 @@ def main() -> None:
                 "tests/test_migrations.py::test_lifecycle_empty_repeat_and_startup",
                 "tests/test_migrations.py::test_lifecycle_preserves_legacy_and_starts_full_ttl",
                 "tests/test_migrations.py::test_lifecycle_rejects_invalid_legacy_without_changes",
+                "tests/test_migrations.py::test_lifecycle_rejects_coercible_legacy_integer_types",
                 "tests/test_migrations.py::test_lifecycle_partial_upgrade_rolls_back",
                 "tests/test_migrations.py::test_startup_rejects_unsupported_revision_without_effects",
                 "tests/test_migrations.py::test_startup_uses_revision_gate_and_migrations_enforce_integrity",
