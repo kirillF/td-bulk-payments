@@ -399,3 +399,46 @@ def test_check_cannot_record_pass_after_aggregate_expiry(tmp_path, monkeypatch, 
     assert calls[1]["deadline"] == 1070  # Same absolute allowance, no fresh cleanup window.
     record = json.loads(next((tmp_path / "checks").glob("*/evidence.json")).read_text())
     assert record["status"] == "FAIL" and record["reason"] == "aggregate_deadline"
+
+
+@pytest.mark.parametrize("denied", ["term", "kill", "both"])
+def test_signal_denial_retains_failed_process_evidence(tmp_path, monkeypatch, denied):
+    import signal
+
+    class Process:
+        pid = 987654
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout):
+            assert 0 <= timeout <= 5
+            return 0
+
+    monkeypatch.setattr(workflow.subprocess, "Popen", lambda *a, **kw: Process())
+
+    def killpg(pid, sig):
+        assert pid == Process.pid
+        if denied == "both" or (sig == signal.SIGTERM) == (denied == "term"):
+            raise PermissionError("test-only signal denial")
+
+    monkeypatch.setattr(workflow.os, "killpg", killpg)
+    result = workflow.run_command(["test-only"], tmp_path, timeout=20)
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "signal_permission_denied"
+    assert result["cleanup_errors"]
+    assert Path(result["log"]).exists()
+    assert json.loads((tmp_path / "command.json").read_text()) == result
+    journal = json.loads((tmp_path / "process-ownership.json").read_text())
+    assert journal["state"] == "uncertain"
+    assert journal["pid"] == Process.pid
+
+
+def test_operator_continuation_preserves_original_deadline():
+    state = json.loads((workflow.STATE / "feature-state.json").read_text())
+    deadline = workflow.operator_refinement_deadline(state)
+    assert deadline == state["operator_refinement_attempt"]["started_epoch"] + 1800
+    state["review6_repair_attempt"]["deadline_epoch"] += 1
+    with pytest.raises(ValueError, match="history changed"):
+        workflow.operator_refinement_deadline(state)

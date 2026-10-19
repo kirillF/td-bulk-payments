@@ -130,7 +130,16 @@ def run_command(
             stderr=raw,
             start_new_session=True,
         )
+        ownership = {
+            "pid": process.pid,
+            "process_group": process.pid,
+            "argv_sha256": digest(json.dumps(argv).encode()),
+            "ownership": "Popen start_new_session for this exact check",
+            "state": "running",
+        }
+        cleanup_errors: list[str] = []
         try:
+            save(directory / "process-ownership.json", ownership)
             while process.poll() is None:
                 if os.fstat(raw.fileno()).st_size > max_output:
                     reason = "output_limit"
@@ -148,6 +157,8 @@ def run_command(
                 os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+            except PermissionError:
+                cleanup_errors.append("SIGTERM_denied")
             try:
                 process.wait(timeout=min(2, max(0, phase_end - time.monotonic())))
             except subprocess.TimeoutExpired:
@@ -156,10 +167,26 @@ def run_command(
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            except PermissionError:
+                cleanup_errors.append("SIGKILL_denied")
             try:
                 process.wait(timeout=min(5, max(0, phase_end - time.monotonic())))
             except subprocess.TimeoutExpired:
+                cleanup_errors.append("wait_expired")
                 status, reason = "FAIL", "process_cleanup_uncertain"
+            if cleanup_errors:
+                status, reason = (
+                    "FAIL",
+                    "signal_permission_denied"
+                    if any(error.endswith("denied") for error in cleanup_errors)
+                    else "process_cleanup_uncertain",
+                )
+            ownership.update(
+                state="uncertain" if cleanup_errors else "completed",
+                cleanup_errors=cleanup_errors,
+                returncode=process.returncode,
+            )
+            save(directory / "process-ownership.json", ownership)
         if time.monotonic() >= phase_end:
             status, reason = "FAIL", "aggregate_deadline"
         if os.fstat(raw.fileno()).st_size > max_output:
@@ -178,6 +205,8 @@ def run_command(
         "status": status,
         "reason": reason,
         "exit_code": process.returncode,
+        "cleanup_errors": cleanup_errors,
+        "process_ownership": str(directory / "process-ownership.json"),
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "log": str(log_path),
         "log_sha256": digest(log),
@@ -246,6 +275,7 @@ def check(group: str) -> Path:
             "LIFECYCLE_IMPLEMENTING",
             "CRUD_IMPLEMENTING",
             "REVIEW6_REPAIRING",
+            "OPERATOR_REFINEMENT_IMPLEMENTING",
         }:
             if state.get("lifecycle_approval_sha256") != LIFECYCLE_AMENDMENT:
                 raise ValueError("Unknown lifecycle authority")
@@ -277,7 +307,9 @@ def check(group: str) -> Path:
         if group not in authority["tasks"][task]["checks"]:
             raise ValueError("Check is not part of the current approved slice")
         deadline = (
-            crud_deadline(state)
+            operator_refinement_deadline(state)
+            if state.get("status") == "OPERATOR_REFINEMENT_IMPLEMENTING"
+            else crud_deadline(state)
             if state.get("status") == "CRUD_IMPLEMENTING"
             else review6_repair_deadline(state)
             if state.get("status") == "REVIEW6_REPAIRING"
@@ -287,9 +319,12 @@ def check(group: str) -> Path:
             "LIFECYCLE_IMPLEMENTING",
             "CRUD_IMPLEMENTING",
             "REVIEW6_REPAIRING",
+            "OPERATOR_REFINEMENT_IMPLEMENTING",
         }:
             deadline = (
-                crud_deadline(state)
+                operator_refinement_deadline(state)
+                if state.get("status") == "OPERATOR_REFINEMENT_IMPLEMENTING"
+                else crud_deadline(state)
                 if state.get("status") == "CRUD_IMPLEMENTING"
                 else review6_repair_deadline(state)
                 if state.get("status") == "REVIEW6_REPAIRING"
@@ -897,6 +932,69 @@ def review6_design_overrides(prior: dict[str, str]) -> dict[str, str]:
     return result
 
 
+OPERATOR_REFINEMENT = "ac917dfa5295a443f839075e9138bebdd7dc1e9f5e5de8d3bfaaffb38003a077"
+
+
+def operator_refinement_authority() -> dict[str, Any]:
+    value = approval(
+        STORE / f"{OPERATOR_REFINEMENT}.payload.json",
+        {
+            "purpose": "project-local-operator-router-planner-refinement-v1",
+            "project": str(ROOT),
+            "scope_id": "bulk-payments",
+        },
+    )
+    for name, expected in value["artifacts"].items():
+        path = Path(name)
+        if path.is_symlink() or ROOT not in path.resolve().parents:
+            raise ValueError("Operator artifact escapes project")
+        if digest(path.read_bytes()) != expected:
+            raise ValueError("Approved operator artifact changed")
+    return value
+
+
+def operator_refinement_deadline(state: dict[str, Any]) -> float:
+    operator_refinement_authority()
+    attempt = state["operator_refinement_attempt"]
+    if attempt["approval_sha256"] != OPERATOR_REFINEMENT or state["repair_rounds_used"] != 5:
+        raise ValueError("Unknown operator continuation")
+    if attempt["deadline_epoch"] != attempt["started_epoch"] + 1800:
+        raise ValueError("Operator continuation allowance changed")
+    baseline = json.loads(
+        (STATE / "operator-refinement-amendment/source-baseline.json").read_text()
+    )
+    original = baseline["original_repair_attempt"]
+    current = state["review6_repair_attempt"]
+    if any(
+        current[key] != original[key]
+        for key in ["started_epoch", "deadline_epoch", "stopped_epoch"]
+    ):
+        raise ValueError("Original repair deadline/history changed")
+    return float(attempt["deadline_epoch"])
+
+
+def operator_design_overrides(prior: dict[str, str]) -> dict[str, str]:
+    directory = STATE / "operator-refinement-amendment"
+    if not (directory / "contract-alignment.json").exists():
+        return prior
+    operator_refinement_authority()
+    alignment = json.loads((directory / "contract-alignment.json").read_text())
+    if alignment["approval_sha256"] != OPERATOR_REFINEMENT:
+        raise ValueError("Unknown operator alignment authority")
+    changes = alignment["changes"]
+    if set(changes) != {name for name in prior if name.startswith("docs/features/")}:
+        raise ValueError("Unexpected operator contract paths")
+    result = dict(prior)
+    for name, change in changes.items():
+        snapshot = directory / "aligned-contracts" / Path(name).name
+        if change["preimage_sha256"] != prior[name]:
+            raise ValueError("Operator contract preimage mismatch")
+        if snapshot.is_symlink() or digest(snapshot.read_bytes()) != change["postimage_sha256"]:
+            raise ValueError("Operator contract snapshot changed")
+        result[name] = change["postimage_sha256"]
+    return result
+
+
 def feature_authority(payload: Path) -> dict[str, Any]:
     policy()
     value = approval(
@@ -916,6 +1014,7 @@ def feature_authority(payload: Path) -> dict[str, Any]:
     overrides = single_pool_design_overrides(overrides)
     overrides = crud_design_overrides(overrides)
     overrides = review6_design_overrides(overrides)
+    overrides = operator_design_overrides(overrides)
     for name, original in value["artifacts"].items():
         expected = overrides.get(name, original)
         path = ROOT / name
