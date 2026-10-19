@@ -537,3 +537,25 @@ def test_startup_rejects_unsupported_revision_without_effects(database_url, revi
         before = state(url)
         assert_startup_rejected(url)
         assert state(url) == before
+
+
+def test_migration_timeouts_apply_before_dialect_initialization(database_url, monkeypatch):
+    from sqlalchemy.dialects.postgresql.psycopg import PGDialect_psycopg
+
+    original = PGDialect_psycopg.initialize
+    observed = []
+
+    def inspect_initial_session(dialect, connection):
+        with connection.connection.driver_connection.cursor() as cursor:
+            cursor.execute("SHOW statement_timeout")
+            statement = cursor.fetchone()[0]
+            cursor.execute("SHOW lock_timeout")
+            lock = cursor.fetchone()[0]
+        observed.append((statement, lock))
+        assert statement != "0" and lock != "0"
+        return original(dialect, connection)
+
+    monkeypatch.setattr(PGDialect_psycopg, "initialize", inspect_initial_session)
+    with new_database(database_url) as url:
+        migrate(url)
+    assert observed

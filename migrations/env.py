@@ -40,7 +40,12 @@ def online() -> None:
     engine = create_engine(
         url.set(drivername="postgresql+psycopg"),
         poolclass=NullPool,
-        connect_args={"connect_timeout": 5, "application_name": "firm-payments-migrate"},
+        connect_args={
+            "connect_timeout": 5,
+            "application_name": "firm-payments-migrate",
+            # Apply limits before dialect initialization issues its first SQL.
+            "options": "-c lock_timeout=10000 -c statement_timeout=30000",
+        },
         hide_parameters=True,
     )
     try:
