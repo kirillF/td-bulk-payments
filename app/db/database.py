@@ -185,7 +185,9 @@ async def run_owned[T](
             except asyncio.CancelledError:
                 return None
             except BaseException as cleanup_error:
-                return cleanup_error
+                # Joining a failed task can re-raise the original work error; that is
+                # not a second failure during cleanup.
+                return None if cleanup_error is original_error else cleanup_error
             return None
 
         cleanup_task = asyncio.create_task(cleanup(), name="payment-db-cleanup")
