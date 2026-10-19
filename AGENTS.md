@@ -8,6 +8,7 @@
 
 ## Working rules
 
+- Commits: follow `docs/harness/COMMIT_POLICY.md` when staging or checkpointing project work.
 - Coordinator: claim Beads work before acting; record evidence/status before yielding. Workers follow assigned ownership and leave Beads/approvals to the coordinator.
 - Agree one useful outcome and constraints,then use a direct edit/run loop. The coordinator manages routine budgeting without approval of time pools or review/retry counts. Routine corrections within that outcome need no new approval package. Escalate changed scope,public interfaces,authority,external publication or explicit operator caps.
 - Formal delivery and release are explicitly requested operations; preserve their records without fabricating completed gates.
@@ -26,7 +27,7 @@ uv sync --locked --all-groups --managed-python
 ### start
 
 ```sh
-uv run --locked uvicorn firm_payments.app:app --host 0.0.0.0 --port 8000
+uv run --locked uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 ### check
