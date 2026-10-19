@@ -9,6 +9,7 @@ import psycopg
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from app.core.config import Settings
 from app.core.observability import BoundedSpanProcessor, SafeExporter
 
 from .conftest import OTHER, PAYEE, PAYER, balances, count, payload, post, running_app
@@ -138,9 +139,8 @@ class BrokenExporter(SpanExporter):
 
 
 def test_full_queue_broken_sink_and_exporter_preserve_money(seeded_database, monkeypatch):
-    monkeypatch.setenv("PAYMENTS_LOG_QUEUE_CAPACITY", "1")
     release = threading.Event()
-    with running_app(seeded_database) as app:
+    with running_app(Settings.local(seeded_database, log_queue_capacity=1)) as app:
         telemetry = app.state.telemetry
         telemetry.sink = lambda _: release.wait(3)
         telemetry.provider.add_span_processor(
@@ -173,10 +173,13 @@ def test_full_queue_broken_sink_and_exporter_preserve_money(seeded_database, mon
 
 
 def test_optional_otlp_unavailable_endpoint_is_bounded(seeded_database, monkeypatch):
-    monkeypatch.setenv("PAYMENTS_OTLP_ENDPOINT", "http://127.0.0.1:1/v1/traces")
-    monkeypatch.setenv("PAYMENTS_TRACE_QUEUE_CAPACITY", "2")
-    monkeypatch.setenv("PAYMENTS_OTLP_TIMEOUT_MS", "100")
-    with running_app(seeded_database) as app:
+    settings = Settings.local(
+        seeded_database,
+        otlp_endpoint="http://127.0.0.1:1/v1/traces",
+        trace_queue_capacity=2,
+        otlp_timeout_ms=100,
+    )
+    with running_app(settings) as app:
         first = post(app, payload("1"), "otlp")
         assert first.status_code == 201
         assert post(app, payload("1"), "otlp").json() == first.json()

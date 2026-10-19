@@ -89,6 +89,10 @@ def change_balances(ctx, values):
 
 @given(parsers.re(r"(?P<step>.+)"))
 def arrange(step, ctx, docstring=None):
+    from .test_settings import settings_given
+
+    if settings_given(ctx, step):
+        return
     from .test_migrations import migration_given
 
     if migration_given(ctx, step):
@@ -269,6 +273,10 @@ def arrange(step, ctx, docstring=None):
 
 @when(parsers.re(r"(?P<step>.+)"))
 def act(step, ctx, docstring=None):
+    from .test_settings import settings_when
+
+    if settings_when(ctx, step):
+        return
     from .test_migrations import migration_when
 
     if migration_when(ctx, step):
@@ -535,6 +543,10 @@ def act(step, ctx, docstring=None):
 
 @then(parsers.re(r"(?P<step>.+)"))
 def verify(step, ctx, datatable=None):
+    from .test_settings import settings_then
+
+    if settings_then(ctx, step):
+        return
     from .test_migrations import migration_then
 
     if migration_then(ctx, step):

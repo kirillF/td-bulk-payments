@@ -61,7 +61,7 @@ exposure; those operating qualifications are outside this take-home.
 
 ## Async operation budgets
 
-Each process owns one AsyncConnectionPool on its lifespan event loop. Payments and readiness await database I/O. One absolute asyncio deadline stops financial work before the operation budget's configured margin, reserving it for connection/task cleanup and response construction. Expiry closes/discards the borrowed session before cancelling and joining the supervised operation. No payment task is detached. PostgreSQL timeouts remain enabled as independent backstops. A timeout during COMMIT is uncertain; retry the same key. Event-loop scheduling and host/network failures do not establish an end-to-end SLA.
+Each process owns separate lifecycle and business AsyncConnectionPools on its lifespan event loop. Their combined maximum and minimum use the existing declared pool allocation, and pending acquisitions share its waiter bound. Payments and readiness await database I/O. One absolute asyncio deadline stops financial work before the operation budget's configured margin, reserving it for connection/task cleanup and response construction. Expiry closes/discards the borrowed session before cancelling and joining the supervised operation. No payment task is detached. PostgreSQL timeouts remain enabled as independent backstops. A timeout during COMMIT is uncertain; retry the same key. Event-loop scheduling and host/network failures do not establish an end-to-end SLA.
 
 Configuration loads repository-root `.env` defaults without changing `os.environ`,
 then applies process environment overrides. No dotenv load happens at import time.
@@ -97,3 +97,16 @@ Lifecycle downgrade is deliberately refused because it would discard safety meta
 The migration-first intermediate image is private: its new payment writer is delivered in
 the subsequent middleware/controller slice. Migration/startup verification alone does not
 establish payment API delivery or acceptance.
+
+
+Runtime configuration is a frozen Pydantic BaseSettings object, validated once and injected
+into pool and telemetry construction. Existing DATABASE_URL/PAYMENTS_* aliases and budget
+requirements remain. Normal precedence is explicit construction > process environment >
+literal local dotenv > permitted defaults. Explicit local/test mapping factories bypass
+ambient sources entirely, including telemetry settings; they never mutate os.environ.
+
+PAYMENTS_IDEMPOTENCY_POOL_MAX defaults1 and must be smaller than the combined
+PAYMENTS_POOL_MAX; both roles retain at least one connection. Metrics aggregate both pool
+roles without adding request labels. PAYMENTS_LOG_LEVEL defaultsINFO and accepts DEBUG,
+INFO, WARNING, ERROR, CRITICAL case-insensitively. Higher thresholds intentionally suppress
+INFO traffic logs. Invalid configuration diagnostics omit raw URL/secret-bearing inputs.

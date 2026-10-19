@@ -231,7 +231,17 @@ def main() -> None:
         )
     elif args.group == "money-unit":
         subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "tests/test_models.py"],
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "tests/test_models.py",
+                "tests/test_settings.py",
+                "tests/test_resource_failures.py::test_distinct_pools_partition_budget_and_share_waiter_bound",
+                "tests/test_journeys.py",
+                "--scenarios=SC-45,SC-46",
+            ],
             cwd=ROOT,
             check=True,
             timeout=60,

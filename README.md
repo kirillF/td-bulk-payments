@@ -94,7 +94,7 @@ See [operations](docs/operations.md) for optional bounded OTLP export and recove
 
 Payment and readiness database I/O runs asynchronously on the app-owned event loop. Each payment has one absolute asyncio timeout budget from pool acquisition through commit; the configured margin reserves bounded cleanup and response work. Expired operations discard their connection before task cancellation, and commit uncertainty is resolved by replaying the same idempotency key.
 
-Configuration uses `python-dotenv`: copy `.env.example` to `.env` for local startup
+Configuration is validated by `pydantic-settings.BaseSettings`, with literal `python-dotenv` defaults: copy `.env.example` to `.env` for local startup
 (the repository includes an ignored local-only `.env` when none existed). Values in
 the process environment override the file. Values are literal, without `${...}`
 interpolation. Startup and `python -m app.db.migrate` share the same loader.
@@ -121,3 +121,16 @@ upgrades serialize before version inspection and fail on the finite migration lo
 Startup validates both application structure and the packaged Alembic head. Missing,
 older or unknown revision state prevents the service from serving requests; run the
 approved upgrade first. Migration execution never occurs inside a payment handler.
+
+
+Settings load once during application startup. Explicit settings and test mappings are
+isolated from ambient environment/dotenv; normal constructor values take precedence over
+process environment, which takes precedence over the literal local file. Unknown log
+levels, invalid numeric fields and inconsistent budgets fail safely before serving.
+`PAYMENTS_LOG_LEVEL` accepts DEBUG, INFO (default), WARNING, ERROR or CRITICAL.
+
+`PAYMENTS_POOL_MAX` is the combined per-process connection maximum, divided between two
+physical pools. `PAYMENTS_IDEMPOTENCY_POOL_MAX` (default1) assigns the lifecycle pool's
+share; the business pool receives the remainder, and both require capacity. The minimum
+and queued-acquisition bound are shared across the allocation. Include every process and
+maintenance command in the deployment connection budget; this split does not double it.

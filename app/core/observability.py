@@ -2,7 +2,6 @@
 
 import json
 import logging
-import os
 import queue
 import re
 import threading
@@ -24,6 +23,8 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from app.core.config import Settings
 
 OUTCOMES = {
     "committed",
@@ -226,26 +227,13 @@ class BoundedSpanProcessor(SpanProcessor):
 
 
 class Telemetry:
-    def __init__(self, sink: Callable[[str], Any] | None = None) -> None:
-        def positive(name: str, default: int) -> int:
-            try:
-                value = int(os.environ.get("PAYMENTS_" + name, str(default)))
-            except ValueError:
-                raise ValueError("Invalid telemetry bound: " + name) from None
-            if not 0 < value <= 100000:
-                raise ValueError("Invalid telemetry bound: " + name)
-            return value
-
-        self.shutdown_seconds = positive("TELEMETRY_SHUTDOWN_MS", 200) / 1000
-        self.health_budget_ms = positive("HEALTH_PROBE_BUDGET_MS", 1000)
-        self.export_timeout = positive("OTLP_TIMEOUT_MS", 200)
-        capacity = positive("LOG_QUEUE_CAPACITY", 256)
-        try:
-            ratio = float(os.environ.get("PAYMENTS_TRACE_SAMPLE_RATIO", "1"))
-        except ValueError:
-            raise ValueError("Invalid trace sampling ratio") from None
-        if not 0 <= ratio <= 1:
-            raise ValueError("Invalid trace sampling ratio")
+    def __init__(self, settings: Settings, sink: Callable[[str], Any] | None = None) -> None:
+        self.shutdown_seconds = settings.telemetry_shutdown_ms / 1000
+        self.health_budget_ms = settings.health_probe_budget_ms
+        self.export_timeout = settings.otlp_timeout_ms
+        self.minimum_log_level = getattr(logging, settings.log_level)
+        capacity = settings.log_queue_capacity
+        ratio = settings.trace_sample_ratio
         self.registry = CollectorRegistry()
         self.attempts = Counter(
             "firm_payments_attempts_total",
@@ -301,7 +289,7 @@ class Telemetry:
             sampler=TraceIdRatioBased(ratio),
         )
         self.tracer = self.provider.get_tracer("firm-payments")
-        endpoint = os.environ.get("PAYMENTS_OTLP_ENDPOINT")
+        endpoint = settings.otlp_endpoint
         if endpoint:
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
@@ -309,7 +297,7 @@ class Telemetry:
                 BoundedSpanProcessor(
                     OTLPSpanExporter(endpoint=endpoint, timeout=self.export_timeout / 1000),
                     self.drop,
-                    capacity=positive("TRACE_QUEUE_CAPACITY", 512),
+                    capacity=settings.trace_queue_capacity,
                     shutdown_seconds=self.shutdown_seconds,
                 )
             )
@@ -337,13 +325,16 @@ class Telemetry:
             pass
 
     def event(self, event: str, **values: Any) -> None:
-        # Callers provide only fixed events and the exact completion fields below.
+        # Filter before formatting or queue admission. Callers use finite severity names.
+        level = values.pop("level", "INFO")
+        if getattr(logging, level, logging.INFO) < self.minimum_log_level:
+            return
         try:
             self.queue.put_nowait(
                 json.dumps(
                     {
                         "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                        "level": values.pop("level", "INFO"),
+                        "level": level,
                         "service": "firm-payments",
                         "version": "0.1.0",
                         "event": event,
@@ -469,7 +460,7 @@ class Telemetry:
 
     def metrics(self, pool: Any) -> bytes:
         try:
-            stats = pool.get_stats()
+            stats = pool.aggregate_stats() if hasattr(pool, "aggregate_stats") else pool.get_stats()
             self.connections.set(stats.get("pool_size", 0))
             self.waiters.set(stats.get("requests_waiting", 0))
             return generate_latest(self.registry)

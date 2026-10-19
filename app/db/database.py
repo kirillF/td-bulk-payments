@@ -5,13 +5,13 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 from psycopg import AsyncConnection, IsolationLevel
 from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow, dict_row
-from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import AsyncConnectionPool, TooManyRequests
 from psycopg_pool.pool_async import ReturnConnection
 
 from app.core.config import Settings
@@ -25,11 +25,30 @@ class Operation:
     returning: bool = False
 
 
+@dataclass
+class AcquisitionBudget:
+    """Shared pending acquisitions across the two pools on one application event loop."""
+
+    maximum: int
+    pending: int = 0
+
+
 class Pool(AsyncConnectionPool[AsyncConnection[DictRow]]):
     settings: Settings
     active_operations: set[asyncio.Task[Any]]
+    admission: AcquisitionBudget
+    peers: tuple[Pool, ...]
 
     async def getconn(self, timeout: float | None = None) -> AsyncConnection[DictRow]:
+        if self.admission.pending >= self.admission.maximum:
+            raise TooManyRequests("Shared acquisition queue is full")
+        self.admission.pending += 1
+        try:
+            return await self._get_admitted(timeout)
+        finally:
+            self.admission.pending -= 1
+
+    async def _get_admitted(self, timeout: float | None) -> AsyncConnection[DictRow]:
         try:
             return await super().getconn(timeout=timeout)
         except BaseException:
@@ -43,6 +62,13 @@ class Pool(AsyncConnectionPool[AsyncConnection[DictRow]]):
                     position for position in self._waiting if position.error is None
                 )
             raise
+
+    def aggregate_stats(self) -> dict[str, int]:
+        statistics = [pool.get_stats() for pool in self.peers]
+        return {
+            "pool_size": sum(value.get("pool_size", 0) for value in statistics),
+            "requests_waiting": sum(value.get("requests_waiting", 0) for value in statistics),
+        }
 
     async def return_owned(self, connection: AsyncConnection[DictRow], owner: Operation) -> None:
         """Transfer ownership to pool maintenance without a cancellable handoff gap.
@@ -147,7 +173,12 @@ async def run_owned[T](
         pool.active_operations.discard(task)
 
 
-def create_pool(configuration: Settings | str) -> Pool:
+def create_pool(
+    configuration: Settings | str,
+    *,
+    role: Literal["business", "lifecycle"] = "business",
+    admission: AcquisitionBudget | None = None,
+) -> Pool:
     settings = Settings.local(configuration) if isinstance(configuration, str) else configuration
 
     async def configure(connection: AsyncConnection[DictRow]) -> None:
@@ -162,17 +193,20 @@ def create_pool(configuration: Settings | str) -> Pool:
             "transaction_timeout": settings.transaction_timeout_ms,
         }.items()
     )
+    lifecycle_min = min(settings.pool_min, settings.idempotency_pool_max)
     pool = Pool(
         settings.database_url,
         connection_class=AsyncConnection[DictRow],
         kwargs={
             "row_factory": dict_row,
             "connect_timeout": settings.connect_timeout_seconds,
-            "application_name": "firm-payments",
+            "application_name": "firm-payments-" + role,
             "options": options,
         },
-        min_size=settings.pool_min,
-        max_size=settings.pool_max,
+        min_size=lifecycle_min if role == "lifecycle" else settings.pool_min - lifecycle_min,
+        max_size=settings.idempotency_pool_max
+        if role == "lifecycle"
+        else settings.pool_max - settings.idempotency_pool_max,
         max_waiting=settings.pool_max_waiting,
         timeout=settings.acquire_timeout_ms / 1000,
         reconnect_timeout=settings.connect_timeout_seconds,
@@ -181,6 +215,8 @@ def create_pool(configuration: Settings | str) -> Pool:
     )
     pool.active_operations = set()
     pool.settings = settings
+    pool.admission = admission or AcquisitionBudget(settings.pool_max_waiting)
+    pool.peers = (pool,)
     return pool
 
 
