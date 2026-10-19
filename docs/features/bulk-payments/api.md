@@ -1,6 +1,6 @@
 # Firm Payments — API contract
 
-Implements [FR-1–19 and NFR-1–12](requirements.md) and [SC-1–59](scenarios.feature) under the accepted
+Implements [FR-1–19 and NFR-1–12](requirements.md) and [SC-1–60](scenarios.feature) under the accepted
 [architecture](architecture.md). This is the proposed program contract, not a claim of
 implementation completion.
 
@@ -174,3 +174,5 @@ Controller, checker, payment service and database ownership/signatures are in co
 The existing async absolute deadline covers A/B/A and cleanup. COMMIT uncertainty remains503,
 external cancellation propagates after bounded owned-task cleanup, and the pool's synchronous
 ownership handoff remains authoritative. No hidden fresh deadline per phase.
+
+Telemetry derives templates and supported method labels from the configured API composition, including prefixes. Unknown paths use unmatched; unsupported methods use OTHER. Probe policy belongs to route declarations. This does not change public endpoints or response bodies.

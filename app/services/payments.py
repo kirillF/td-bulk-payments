@@ -11,11 +11,8 @@ from app.schemas.payments import MAX_CENTS, BulkPayment, BulkPaymentResponse, Pa
 
 
 def plan_transfer(request: BulkPayment, firms: dict[str, Row]) -> TransferPlan | TransferResult:
-    """Validate locked balances and compute every delta before permitting writes."""
+    """Plan against a complete locked firm map already validated by the caller."""
     payer_uuid = str(request.payer_firm_uuid)
-    required = {payer_uuid, *(str(p.payee_firm_uuid) for p in request.payments)}
-    if required != firms.keys():
-        return TransferResult("rejected", {"detail": "unknown_firm"})
     payer = firms[payer_uuid]
     if payer["balance_cents"] < request.total_cents:
         return TransferResult("rejected", {"detail": "insufficient_funds"})
@@ -66,6 +63,9 @@ class BulkPaymentService:
             )
             firms = await storage.lock_firms(connection, firm_uuids)
         with stage("payments.plan"):
+            # CRUD returns only requested, uniquely indexed UUIDs; cardinality proves completeness.
+            if len(firms) != len(firm_uuids):
+                return TransferResult("rejected", {"detail": "unknown_firm"})
             plan = plan_transfer(request, firms)
         if isinstance(plan, TransferResult):
             return plan

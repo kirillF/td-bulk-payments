@@ -587,3 +587,170 @@ def correlation_step(ctx, step, stage):
         ctx.correlation_verified = True
     assert ctx.correlation_verified
     return True
+
+
+ROUTE_CASES = {
+    "extra_method": (
+        "PATCH",
+        "/configured/items/raw-secret",
+        "/configured/items/{item}",
+        "PATCH",
+        200,
+        False,
+    ),
+    "second_method": (
+        "DELETE",
+        "/configured/items/raw-secret",
+        "/configured/items/{item}",
+        "DELETE",
+        200,
+        False,
+    ),
+    "parameterized": (
+        "PATCH",
+        "/configured/items/another-secret",
+        "/configured/items/{item}",
+        "PATCH",
+        200,
+        False,
+    ),
+    "changed_prefix": (
+        "PATCH",
+        "/alternate/items/raw-secret",
+        "/alternate/items/{item}",
+        "PATCH",
+        200,
+        False,
+    ),
+    "unsupported": (
+        "HOSTILE-METHOD",
+        "/configured/items/raw-secret",
+        "/configured/items/{item}",
+        "OTHER",
+        405,
+        False,
+    ),
+    "configured_probe": (
+        "GET",
+        "/configured/custom-probe",
+        "/configured/custom-probe",
+        "GET",
+        200,
+        True,
+    ),
+}
+
+
+def configured_route_signals(case):
+    from fastapi import APIRouter, FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api.route_metadata import ProbeRoute, RouteComposition
+    from app.core.observability import RequestTelemetryMiddleware, Telemetry
+
+    method, path, template, label, status, probe = ROUTE_CASES[case]
+    application = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+    router = APIRouter()
+
+    async def item(item: str):
+        return {"ok": True}
+
+    router.add_api_route("/items/{item}", item, methods=["PATCH", "DELETE"])
+    probes = APIRouter(route_class=ProbeRoute)
+
+    @probes.get("/custom-probe")
+    async def custom_probe():
+        return {"ok": True}
+
+    composition = RouteComposition(application)
+    prefix = "/alternate" if case == "changed_prefix" else "/configured"
+    composition.include(router, prefix=prefix)
+    composition.include(probes, prefix=prefix)
+    describe = composition.freeze()
+    telemetry = Telemetry(settings=Settings.local("postgresql://unused"), request_metadata=describe)
+    logs = []
+    telemetry.sink = logs.append
+    memory = InMemorySpanExporter()
+    telemetry.provider.add_span_processor(SimpleSpanProcessor(SafeExporter(memory, telemetry.drop)))
+    application.state.telemetry = telemetry
+    application.add_middleware(RequestTelemetryMiddleware, owner=application)
+    try:
+        with TestClient(application) as client:
+            response = client.request(method, path)
+            assert response.status_code == status
+            complete = wait_events(logs, 1)[0]
+            arrived = next(
+                json.loads(x) for x in logs if json.loads(x)["event"] == "http.request.arrived"
+            )
+            for event in [arrived, complete]:
+                assert event["route"] == template
+                assert event["method"] == label
+            spans = memory.get_finished_spans()
+            assert any(s.attributes.get("http.route") == template for s in spans)
+            metrics = telemetry.metrics(type("Pool", (), {"get_stats": lambda self: {}})()).decode()
+            signals = "".join(logs) + metrics + str([dict(s.attributes) for s in spans])
+            assert "raw-secret" not in signals and "another-secret" not in signals
+            assert "HOSTILE-METHOD" not in signals
+            attempts = telemetry.registry.get_sample_value(
+                "firm_payments_attempts_total", {"outcome": "observed"}
+            )
+            assert attempts in {None, 0} if probe or status >= 400 else attempts == 1
+            head = client.head(prefix + "/custom-probe")
+            assert head.status_code == 405
+            head_event = wait_events(logs, 2)[-1]
+            assert (head_event["route"], head_event["method"]) == (
+                prefix + "/custom-probe",
+                "OTHER",
+            )
+            # Missing paths and unsupported methods remain finite.
+            missing = client.request("HOSTILE-METHOD", prefix + "/unregistered-secret")
+            assert missing.status_code == 404
+            last = wait_events(logs, 3)[-1]
+            assert (last["route"], last["method"]) == ("unmatched", "OTHER")
+            assert "unregistered-secret" not in "".join(logs)
+            with pytest.raises(ValueError, match="frozen"):
+                composition.include(router)
+    finally:
+        telemetry.close()
+
+
+@pytest.mark.parametrize("case", list(ROUTE_CASES))
+def test_configured_route_signals(case):
+    configured_route_signals(case)
+
+
+def test_route_metadata_failure_is_safe_and_instances_are_independent():
+    from fastapi import APIRouter, FastAPI
+
+    from app.api.route_metadata import RouteComposition
+    from app.core.observability import Telemetry
+
+    router = APIRouter()
+
+    @router.put("/entry")
+    async def entry():
+        return {}
+
+    one, two = RouteComposition(FastAPI()), RouteComposition(FastAPI())
+    one.include(router, prefix="/one")
+    two.include(router, prefix="/two")
+    scope = {"type": "http", "path": "/one/entry", "method": "PUT", "root_path": ""}
+    assert one.freeze()(scope).route == "/one/entry"
+    assert two.freeze()(scope).route == "unmatched"
+
+    def broken(scope):
+        raise RuntimeError("private route metadata")
+
+    telemetry = Telemetry(settings=Settings.local("postgresql://unused"), request_metadata=broken)
+    try:
+        context = telemetry.begin(scope)
+        assert (context.route, context.method) == ("unmatched", "OTHER")
+        telemetry.finish(context, 200)
+        assert (
+            telemetry.registry.get_sample_value(
+                "firm_payments_telemetry_dropped_total", {"signal": "metrics"}
+            )
+            == 1
+        )
+    finally:
+        telemetry.close()

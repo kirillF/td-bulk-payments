@@ -127,7 +127,7 @@ def main() -> None:
                 "test_external_cancellation_joins_operation_and_preserves_recovery[payment]",
                 "tests/test_health.py",
                 "tests/test_journeys.py",
-                "--scenarios=SC-22,SC-23,SC-24,SC-25,SC-39,SC-40,SC-41,SC-42,SC-43,SC-44,SC-47",
+                "--scenarios=SC-22,SC-23,SC-24,SC-25,SC-39,SC-40,SC-41,SC-42,SC-43,SC-44,SC-47,SC-60",
             ],
             cwd=ROOT,
             check=True,

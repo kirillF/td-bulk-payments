@@ -5,6 +5,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+@dataclass(frozen=True)
+class RequestRoute:
+    route: str = "unmatched"
+    method: str = "OTHER"
+    is_probe: bool = False
+
+
 @dataclass
 class RequestContext:
     request_id: str

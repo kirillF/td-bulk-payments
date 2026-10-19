@@ -151,7 +151,7 @@ No throughput claim, external collector, authentication or production ingress po
 
 ## Verification and gates
 
-SC-1–59 and every outline row must be bound, including changed processing/retry semantics.
+SC-1–60 and every outline row must be bound, including changed processing/retry semantics.
 Exercise independent pools, actual PostgreSQL coordination, expired-generation races,
 old-owner resumption, migration preservation and faults before/after every A/B commit.
 Verify safe fallback headers, context isolation, INFO/DEBUG filtering, redaction, settings
@@ -183,3 +183,6 @@ independently in business transaction B, between admission A and publication A.
 Decode raw JSON separately from model validation. Decoder failures return safe422 before
 admission; model validation retains its schema errors. Neither path exposes raw input.
 Oversized integer conversion is covered alongside the existing safe nesting rejection.
+
+### Configured HTTP telemetry boundary
+API composition installs public leaf route declarations and generates immutable metadata matchers before serving. ProbeRoute declares operational policy at the route owner. Core consumes injected RequestRoute metadata before dispatch, including middleware short circuits; it owns no endpoint, method or probe URL inventory. Parameter values never become labels. Each application freezes its own composition.

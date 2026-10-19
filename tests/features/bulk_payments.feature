@@ -602,3 +602,19 @@ Feature: Atomic and idempotent bulk settlement between firms
       | kind                     |
       | integer conversion limit |
       | excessive nesting        |
+
+
+  @SC-60
+  Scenario Outline: Observability consumes configured HTTP route metadata
+    Given configured HTTP metadata case "<case>"
+    When the configured route receives a request
+    Then signals follow configured templates methods and probe policy without raw metadata
+
+    Examples:
+      | case             |
+      | extra_method     |
+      | second_method    |
+      | parameterized    |
+      | changed_prefix   |
+      | unsupported      |
+      | configured_probe |

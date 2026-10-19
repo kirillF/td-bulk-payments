@@ -22,7 +22,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from app.core.config import Settings
 from app.core.logging import StructuredLogger, request_fields, stage
 from app.core.request_context import CURRENT as CURRENT
-from app.core.request_context import RequestContext
+from app.core.request_context import RequestContext, RequestRoute
 from app.schemas.headers import correlation_id
 
 OUTCOMES = {
@@ -214,7 +214,13 @@ class BoundedSpanProcessor(SpanProcessor):
 
 
 class Telemetry:
-    def __init__(self, settings: Settings, sink: Callable[[str], Any] | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        sink: Callable[[str], Any] | None = None,
+        request_metadata: Callable[[Scope], RequestRoute] | None = None,
+    ) -> None:
+        self.request_metadata = request_metadata
         self.shutdown_seconds = settings.telemetry_shutdown_ms / 1000
         self.health_budget_ms = settings.health_probe_budget_ms
         self.export_timeout = settings.otlp_timeout_ms
@@ -323,16 +329,20 @@ class Telemetry:
                 self.queue.task_done()
 
     def begin(self, scope: Scope) -> RequestContext:
-        path = scope.get("path", "")
-        method = scope.get("method", "")
+        route = RequestRoute()
+        try:
+            if self.request_metadata is not None:
+                route = self.request_metadata(scope)
+        except Exception:
+            self.drop("metrics")
         context = RequestContext(
             uuid4().hex,
-            "/v1/bulk-payments" if path == "/v1/bulk-payments" else "unmatched",
-            method if method in {"GET", "POST"} else "OTHER",
+            route.route,
+            route.method,
             time.monotonic(),
             correlation_id=correlation_id(scope.get("headers", [])),
             logger=self.logger,
-            is_probe=path in {"/health/live", "/health/ready", "/metrics"},
+            is_probe=route.is_probe,
         )
         try:
             carrier = {}
@@ -351,7 +361,7 @@ class Telemetry:
     def finish(self, context: RequestContext, status: int | None) -> None:
         outcome = context.outcome or (
             "observed"
-            if context.is_probe and status is not None and status < 400
+            if status is not None and status < 400
             else "validation_rejected"
             if status is not None and status < 500
             else "transient_failure"

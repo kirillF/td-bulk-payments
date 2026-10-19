@@ -23,7 +23,9 @@ def create_app(configuration: Settings | str | None = None) -> FastAPI:
         )
         application.state.settings = settings
         pool = create_pool(settings)
-        telemetry = Telemetry(settings=settings)
+        telemetry = Telemetry(
+            settings=settings, request_metadata=application.state.request_metadata
+        )
         application.state.telemetry = telemetry
         try:
             async with asyncio.timeout(settings.startup_timeout_ms / 1000):
@@ -44,7 +46,7 @@ def create_app(configuration: Settings | str | None = None) -> FastAPI:
 
     application.middleware("http")(idempotency_middleware)
     application.add_middleware(RequestTelemetryMiddleware, owner=application)
-    install_routes(application)
+    application.state.request_metadata = install_routes(application)
     return application
 
 

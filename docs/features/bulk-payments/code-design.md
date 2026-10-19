@@ -255,7 +255,7 @@ shutdown. No traceback capture with sensitive locals or library handler bypass.
 ## Verification
 
 Keep real PostgreSQL Testcontainers, Linux HTTP verification and generated-ID gap oracle.
-Bind SC-1–59, all outline rows and changed processing semantics. Observe real concurrent
+Bind SC-1–60, all outline rows and changed processing semantics. Observe real concurrent
 coordination through independent pools; hold B after A claim to assert fast processing 409.
 Inject failures before/after A claim, B receipt/commit and A publication; resume stale owners
 after recovery/deletion; race TTL cleanup with B/duplicates. No missing Docker skip or fake PASS.
@@ -291,3 +291,8 @@ independently in business transaction B, between admission A and publication A.
 Decode raw JSON separately from model validation. Decoder failures return safe422 before
 admission; model validation retains its schema errors. Neither path exposes raw input.
 Oversized integer conversion is covered alongside the existing safe nesting rejection.
+
+### Operator responsibility refinements
+`app/api/route_metadata.py` composes public leaf routers and produces a frozen per-instance RequestRoute resolver. `ProbeRoute` marks operational routes at declaration. The adapter handles full and partial method matches with finite fallbacks; core receives the resolver through Telemetry and never lists endpoints or verbs. Register leaf routers through RouteComposition before freezing; later route changes require rebuilding the application.
+The payment caller builds unique participant UUIDs once, locks the requested uniquely indexed firms through CRUD, and rejects a cardinality mismatch before plan_transfer. The planner consumes the validated complete map; duplicate payees and self-payees retain existing semantics.
+Check execution journals its owned process group before polling; denied signals produce retained command logs, uncertain cleanup evidence and FAIL within the existing absolute budget. No cleanup success is inferred from absent processes.

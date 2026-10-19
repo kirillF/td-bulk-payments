@@ -5,11 +5,12 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 from psycopg_pool import PoolClosed, PoolTimeout, TooManyRequests
 
+from app.api.route_metadata import ProbeRoute
 from app.core.logging import stage
 from app.core.observability import attempt_result
 from app.db.database import Connection, is_ready, run_owned
 
-router = APIRouter()
+router = APIRouter(route_class=ProbeRoute)
 
 
 @router.get("/health/live")

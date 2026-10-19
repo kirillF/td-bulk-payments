@@ -90,7 +90,7 @@ These are explicit product choices for review, not throughput claims:
 | NFR-3 | Database connections, queues, waits, and retries must be bounded. Specific values are architecture-stage proposals, justified against the deployment connection budget and request deadline. |
 | NFR-4 | Reproducible Python dependency lock; formatting/lint and strict application/script typing checks. Integration/Gherkin checks use real PostgreSQL 17 through Testcontainers and fail if Docker is unavailable. Fresh-input verification must establish that ignored/generated prerequisites can be reproduced. Execution follows the audited project-local boundary; native isolation is not claimed. |
 | NFR-5 | Service image uses Python 3.15 and a non-root UID. Compose starts PostgreSQL, applies versioned migrations, then starts the service. Verify a built Linux container with real HTTP and persisted database effects. Local-only credentials/ports are documented. |
-| NFR-6 | Emit machine-readable structured operational logs with request correlation and distinguish successful transfers, replays, business/validation rejections, conflicts, transient failures and uncertain commit outcomes. Exclude credentials, raw keys, financial payloads and sensitive identities. Verify event structure, correlation and redaction. |
+| NFR-6 | Emit machine-readable structured operational logs with request correlation and distinguish successful transfers, replays, business/validation rejections, conflicts, transient failures and uncertain commit outcomes. Exclude credentials, raw keys, financial payloads and sensitive identities. Verify event structure, correlation and redaction. Route templates, method labels and probe classification come from API configuration; observability must not own duplicated endpoint or method inventories. Unmatched or unsupported inputs use finite fallback labels without raw path values. |
 | NFR-7 | Expose bounded-cardinality metrics for traffic/outcomes, latency, database/pool contention and failures; provide correlated traces and separate liveness/readiness signals. Instrumentation must not change monetary outcomes, block transactions on external telemetry, or claim operational metrics are an authoritative financial ledger. Verify signal semantics, dependency failure and telemetry isolation. |
 | NFR-8 | Migration execution has finite connection, lock and statement waits, reads runtime configuration without exposing credentials, and is reproducible from the locked production dependencies and packaged revision resources. Migration concurrency and failure verification uses real PostgreSQL. |
 
@@ -182,7 +182,7 @@ Additional scenario mapping:
 The current source implements the earlier Alembic contract; earlier PASS evidence remains
 bound to that earlier candidate. This target changes FR-5–8 and INV-4, adds FR-15–19,
 NFR-9–12 and INV-8, updates affected prior scenarios and adds SC-39–58. It contains
-59 scenarios / 100 expanded cases. No new behavior or check is delivered by this draft.
+60 scenarios / 106 expanded cases. No new behavior or check is delivered by this draft.
 
 Schema authority: Alembic migrations define tables, constraints and indexes; PostgreSQL
 enforces data integrity. Startup verifies connectivity and supported revision without
@@ -192,3 +192,5 @@ Lifecycle, business and publication use independent successive transactions from
 bounded pool, with physical session reuse permitted and pool_max=1 supported.
 
 | SC-59 | Existing FR-1, FR-15, FR-17; INV-6: raw decoder boundary failures return safe422 with diagnostic metadata before admission or financial changes. Payload dimensions are test-profile values, not product limits. |
+
+| SC-60 | NFR-6–7: API-configured routes, methods, prefixes and probe policy govern bounded redacted signals, including pre-dispatch arrival/completion. |

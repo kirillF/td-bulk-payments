@@ -89,6 +89,9 @@ def change_balances(ctx, values):
 
 @given(parsers.re(r"(?P<step>.+)"))
 def arrange(step, ctx, docstring=None):
+    if step.startswith('configured HTTP metadata case "'):
+        ctx.route_case = step.split('"')[1]
+        return
     if step.startswith('a raw decoder boundary payload "'):
         ctx.decoder_kind = step.split('"')[1]
         ctx.decoder_balances = balances(ctx.db)
@@ -295,6 +298,12 @@ def arrange(step, ctx, docstring=None):
 
 @when(parsers.re(r"(?P<step>.+)"))
 def act(step, ctx, docstring=None):
+    if step == "the configured route receives a request":
+        from .test_observability import configured_route_signals
+
+        configured_route_signals(ctx.route_case)
+        ctx.route_verified = True
+        return
     if step == "the raw decoder boundary request is submitted":
         from .test_core import raw_decoder_response
 
@@ -584,6 +593,9 @@ def act(step, ctx, docstring=None):
 
 @then(parsers.re(r"(?P<step>.+)"))
 def verify(step, ctx, datatable=None):
+    if step == "signals follow configured templates methods and probe policy without raw metadata":
+        assert ctx.route_verified
+        return
     if step == "safe 422 diagnostic metadata is returned without money or admission changes":
         from .test_core import assert_decoder_rejected
 

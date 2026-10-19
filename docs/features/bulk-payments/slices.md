@@ -308,7 +308,7 @@ Scenarios: SC-1, SC-2, SC-3, SC-4, SC-5, SC-6, SC-7, SC-8, SC-9, SC-10, SC-11, S
 
 Acceptance:
 
-- Bind all59 scenarios and every100 expanded case; changed old idempotency semantics must be deliberate, not a removed check.
+- Bind all60 scenarios and every106 expanded case; changed old idempotency semantics must be deliberate, not a removed check.
 - All12 groups on exact source/environment, genuine Docker/Testcontainers contention/faults, sequence gap mutant, money sample and real Linux HTTP status/header/cache/TTL flow.
 - Candidate-bound full-source review fits existing640000/1310720 caps and900-second bound; preflight fails closed, no source truncation.
 - Existing .env.example review alias request is still unapproved and bound to the older source. Prepare fresh exact representation exception if necessary; no inferred review permission.
@@ -396,3 +396,6 @@ complete current-source review7 are required; acceptance remains separate. One12
 repair allowance includes checks and at least240 seconds verification/handoff. Review7
 has its separate1200-second aggregate allowance including900-second reviewer/300-second
 verification bounds. No reset of historical attempts, deadlines or counters.
+
+## Operator route/planner refinement continuation
+Task operator-route-planner-refinement applies API-owned telemetry metadata and caller-only firm completeness validation. Preserve the expired original repair5 attempt; the separately approved 1800-second continuation includes at least360 seconds verification/handoff. Bind SC60 six configuration cases:60 scenarios/106 expanded cases. Refresh all12 groups on one candidate and use only reserved review7; final acceptance remains a separate gate. Preserve failed signal-denied run uncertainty and validate bounded failure evidence.
