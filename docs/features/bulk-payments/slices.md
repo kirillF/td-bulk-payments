@@ -177,7 +177,7 @@ app/schemas/payments.py
 app/schemas/headers.py
 app/services/idempotency.py
 app/services/payments.py
-app/db/idempotency.py
+app/crud/idempotency.py
 app/db/database.py
 tests/test_health.py
 docs/features/bulk-payments/feature.json
@@ -234,7 +234,7 @@ app/api/v1/payments.py
 app/services/payments.py
 app/services/idempotency.py
 app/db/database.py
-app/db/idempotency.py
+app/crud/idempotency.py
 tests/test_settings.py
 tests/test_observability.py
 tests/test_health.py
@@ -273,7 +273,7 @@ Owned paths (shared extensions are sequential):
 
 ```text
 app/db/idempotency_maintenance.py
-app/db/idempotency.py
+app/crud/idempotency.py
 app/db/database.py
 app/api/middleware/idempotency.py
 app/services/idempotency.py
@@ -330,7 +330,7 @@ app/core/logging.py
 app/core/observability.py
 app/core/request_context.py
 app/db/database.py
-app/db/idempotency.py
+app/crud/idempotency.py
 app/db/idempotency_maintenance.py
 app/db/migrate.py
 app/main.py
@@ -372,3 +372,17 @@ alembic.ini
 ```
 
 Registered checks: baseline-syntax, local-policy, quality, container-boot, money-unit, atomic-api, uuid-index, idempotency, contention, resource-failures, observability, container-http.
+
+## CRUD/database API alignment
+
+HTTP controllers and middleware orchestrate independent services. Services own monetary or
+idempotency lifecycle decisions and call their matching app/crud modules. CRUD owns explicit
+parameterized SQL; app/db/database.py owns query execution, cursor cleanup, shared connection
+types, pool ownership, transactions/savepoints and operation budgets. Readiness uses the same
+database API. Alembic SQL remains migration-owned. There is one bounded pool and no ORM.
+
+Idempotency resolution acquires one guard and freshly checks the generation/owner once,
+validates the durable receipt, then conditionally publishes or deletes under that lock. NOWAIT
+failures roll back only a database-owned savepoint. Busy/active owners remain processing;
+recovery never executes payments. Controllers call fencing, payments and receipt recording
+independently in business transaction B, between admission A and publication A.

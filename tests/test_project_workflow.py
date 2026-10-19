@@ -249,3 +249,57 @@ def test_single_pool_alignment_rejects_wrong_prior_and_changed_snapshot(monkeypa
     monkeypatch.setattr(Path, "read_bytes", altered)
     with pytest.raises(ValueError, match="snapshot changed"):
         workflow.single_pool_design_overrides(prior)
+
+
+def test_retry_retains_original_aggregate_deadline():
+    state = {
+        "attempts": {"middleware": {"started_epoch": 1100, "deadline_epoch": 2300}},
+        "attempt_history": {"middleware": [{"started_epoch": 100, "deadline_epoch": 1300}]},
+    }
+    assert workflow.lifecycle_deadline(state, "middleware") == 1300
+
+
+def test_crud_deadline_cannot_be_replenished(monkeypatch):
+    monkeypatch.setattr(workflow, "crud_authority", lambda: {})
+    state = {
+        "crud_approval_sha256": workflow.CRUD_AMENDMENT,
+        "crud_attempt": {"started_epoch": 100, "deadline_epoch": 1300},
+    }
+    assert workflow.crud_deadline(state) == 1300
+    state["crud_attempt"]["deadline_epoch"] = 1400
+    with pytest.raises(ValueError, match="aggregate allowance changed"):
+        workflow.crud_deadline(state)
+
+
+def test_application_persistence_boundaries():
+    """Keep driver calls/SQL out of business and HTTP layers as code evolves."""
+    import ast
+
+    root = Path(__file__).resolve().parents[1]
+    for directory in ["app/services", "app/api", "app/crud"]:
+        for path in (root / directory).rglob("*.py"):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    if isinstance(node.func.value, ast.Name):
+                        assert not (
+                            node.func.value.id == "connection"
+                            and node.func.attr
+                            in {"execute", "cursor", "transaction", "commit", "rollback"}
+                        ), str(path)
+                if isinstance(node, ast.ImportFrom):
+                    assert node.module != "app.db.idempotency", str(path)
+                    if directory == "app/crud":
+                        assert not (node.module or "").startswith(
+                            ("app.services", "app.api", "app.schemas")
+                        ), str(path)
+                if directory != "app/crud" and isinstance(node, ast.Constant):
+                    if isinstance(node.value, str):
+                        assert (
+                            not node.value.lstrip()
+                            .upper()
+                            .startswith(
+                                ("SELECT ", "INSERT INTO ", "UPDATE FIRMS ", "DELETE FROM ")
+                            )
+                        ), str(path)
+    assert not (root / "app/db/idempotency.py").exists()

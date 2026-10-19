@@ -230,7 +230,7 @@ def check(group: str) -> Path:
         state = json.loads((STATE / "feature-state.json").read_text())
         authority = feature_authority(Path(state["payload"]))
         task = state["current_task"]
-        if state.get("status") == "LIFECYCLE_IMPLEMENTING":
+        if state.get("status") in {"LIFECYCLE_IMPLEMENTING", "CRUD_IMPLEMENTING"}:
             if state.get("lifecycle_approval_sha256") != LIFECYCLE_AMENDMENT:
                 raise ValueError("Unknown lifecycle authority")
             contract = json.loads((ROOT / "docs/features/bulk-payments/feature.json").read_text())
@@ -260,9 +260,17 @@ def check(group: str) -> Path:
             authority = dict(authority, tasks=tasks)
         if group not in authority["tasks"][task]["checks"]:
             raise ValueError("Check is not part of the current approved slice")
-        deadline = state["attempts"][task]["deadline_epoch"]
-        if state.get("status") == "LIFECYCLE_IMPLEMENTING":
-            deadline = lifecycle_deadline(state, task)
+        deadline = (
+            crud_deadline(state)
+            if state.get("status") == "CRUD_IMPLEMENTING"
+            else state["attempts"][task]["deadline_epoch"]
+        )
+        if state.get("status") in {"LIFECYCLE_IMPLEMENTING", "CRUD_IMPLEMENTING"}:
+            deadline = (
+                crud_deadline(state)
+                if state.get("status") == "CRUD_IMPLEMENTING"
+                else lifecycle_deadline(state, task)
+            )
         if state.get("status") == "VERSIONED_IMPLEMENTING":
             attempt = state["versioned_attempt"]
             if attempt["approval_sha256"] != VERSIONED_AMENDMENT:
@@ -572,7 +580,9 @@ def lifecycle_deadline(state: dict[str, Any], task: str) -> float:
     attempt = state["attempts"][task]
     continuations = attempt.get("continuations", [])
     if not continuations:
-        return float(attempt["deadline_epoch"])
+        # Infrastructure retries never replenish an aggregate slice allowance.
+        history = state.get("attempt_history", {}).get(task, [])
+        return min(float(item["deadline_epoch"]) for item in [*history, attempt])
     if task != "lifecycle-container-migration" or len(continuations) != 1:
         raise ValueError("Unapproved lifecycle continuation")
     extension = continuations[0]
@@ -717,6 +727,59 @@ def single_pool_design_overrides(prior: dict[str, str]) -> dict[str, str]:
     return result
 
 
+CRUD_AMENDMENT = "b5277513d12e616365d018a2c6c9bdc47885315050750cdda211dc1aa4def074"
+
+
+def crud_authority() -> dict[str, Any]:
+    value = approval(
+        STORE / f"{CRUD_AMENDMENT}.payload.json",
+        {
+            "purpose": "project-local-crud-boundaries-and-authority-revalidation-v1",
+            "project": str(ROOT),
+            "scope_id": "bulk-payments",
+        },
+    )
+    for name, expected in value["artifacts"].items():
+        path = Path(name)
+        if path.is_symlink() or ROOT not in path.resolve().parents:
+            raise ValueError("CRUD authority artifact escapes project")
+        if digest(path.read_bytes()) != expected:
+            raise ValueError("Approved CRUD authority artifact changed")
+    return value
+
+
+def crud_design_overrides(prior: dict[str, str]) -> dict[str, str]:
+    directory = STATE / "crud-authority-amendment"
+    if not (directory / "contract-alignment.json").exists():
+        return prior
+    crud_authority()
+    alignment = json.loads((directory / "contract-alignment.json").read_text())
+    if alignment["approval_sha256"] != CRUD_AMENDMENT:
+        raise ValueError("Unknown CRUD contract alignment authority")
+    changes = alignment["changes"]
+    if set(changes) != {name for name in prior if name.startswith("docs/features/")}:
+        raise ValueError("Unexpected CRUD contract paths")
+    result = dict(prior)
+    for name, change in changes.items():
+        if change["preimage_sha256"] != prior[name]:
+            raise ValueError("CRUD contract preimage mismatch")
+        snapshot = directory / "aligned-contracts" / Path(name).name
+        if snapshot.is_symlink() or digest(snapshot.read_bytes()) != change["postimage_sha256"]:
+            raise ValueError("CRUD contract snapshot changed")
+        result[name] = change["postimage_sha256"]
+    return result
+
+
+def crud_deadline(state: dict[str, Any]) -> float:
+    crud_authority()
+    if state.get("crud_approval_sha256") != CRUD_AMENDMENT:
+        raise ValueError("Unknown CRUD slice authority")
+    attempt = state["crud_attempt"]
+    if attempt["deadline_epoch"] != attempt["started_epoch"] + 1200:
+        raise ValueError("CRUD aggregate allowance changed")
+    return float(attempt["deadline_epoch"])
+
+
 def feature_authority(payload: Path) -> dict[str, Any]:
     policy()
     value = approval(
@@ -734,6 +797,7 @@ def feature_authority(payload: Path) -> dict[str, Any]:
     overrides = aligned_alembic_overrides(value, overrides)
     overrides = lifecycle_design_overrides(value, overrides)
     overrides = single_pool_design_overrides(overrides)
+    overrides = crud_design_overrides(overrides)
     for name, original in value["artifacts"].items():
         expected = overrides.get(name, original)
         path = ROOT / name

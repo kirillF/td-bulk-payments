@@ -15,9 +15,10 @@ Pydantic schemas and plain records. SQLAlchemy Core is confined to Alembic migra
 | app/schemas/payments.py, headers.py, errors.py, idempotency.py | All request/response/header validation, canonical fingerprint, stored-result validation and safe serialization. No pool or service imports. |
 | app/api/middleware/idempotency.py | Prepare payment requests once; ask checker using A; return replay/processing/conflict or admit controller; publish completed from durable receipt after B. |
 | app/api/v1/payments.py | HTTP controller orchestrates admitted monetary work and receipt encoding/recording within database-owned B transaction. Maps protocol errors without SQL or transaction lifecycle. |
-| app/services/idempotency.py | Lightweight claim/resolve decision only. Uses storage helpers; does not execute callbacks/payments, interpret payment response bodies, own response capture or recovery loops. |
-| app/services/payments.py | Monetary operations only: indexed resolution, ordered firm locks, funds/overflow checks, balance deltas and ordered inserts. |
-| app/db/idempotency.py | Claim/lookups, guards, receipts and conditional publication SQL; no financial service calls or hidden commit. |
+| app/services/idempotency.py | Independent admission, execution fencing, receipt validation, publication, failure release and one-generation recovery policy. Uses CRUD; never executes payment callbacks or owns HTTP response capture or transaction commits. |
+| app/services/payments.py | Monetary rules, participant selection, funds/overflow checks, transfer planning and ordered response assembly. Calls payment CRUD for persistence. |
+| app/crud/payments.py | Indexed participant locking, balance changes and payment INSERT RETURNING SQL through database.py; no business rules or HTTP schemas. |
+| app/crud/idempotency.py | Claim/lookups, guard locks, receipt reads/writes and conditional publication/deletion SQL via database.py; no recovery policy or commits. |
 | app/db/database.py | Pool, supervised transaction/timeout/cancellation boundaries and supported Alembic revision gate. |
 | app/db/idempotency_maintenance.py | Explicit finite reconciliation/cleanup CLI and bounded per-generation work; no monetary execution. |
 | app/models/idempotency.py | Typed decisions, admission token, generation/owner and opaque stored-result envelope. |
@@ -270,3 +271,17 @@ The runtime database module owns revision checking, not a structural schema orac
 Immutable revisions retain their compatibility entry point, delegating only legacy
 adoption verification to migrations/legacy_schema.py. Alembic DDL and PostgreSQL enforce
 current constraints; migration tests verify them. No current-schema postflight oracle runs.
+
+## CRUD/database API alignment
+
+HTTP controllers and middleware orchestrate independent services. Services own monetary or
+idempotency lifecycle decisions and call their matching app/crud modules. CRUD owns explicit
+parameterized SQL; app/db/database.py owns query execution, cursor cleanup, shared connection
+types, pool ownership, transactions/savepoints and operation budgets. Readiness uses the same
+database API. Alembic SQL remains migration-owned. There is one bounded pool and no ORM.
+
+Idempotency resolution acquires one guard and freshly checks the generation/owner once,
+validates the durable receipt, then conditionally publishes or deletes under that lock. NOWAIT
+failures roll back only a database-owned savepoint. Busy/active owners remain processing;
+recovery never executes payments. Controllers call fencing, payments and receipt recording
+independently in business transaction B, between admission A and publication A.

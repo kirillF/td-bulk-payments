@@ -163,3 +163,17 @@ Schema structure is owned by Alembic migrations and PostgreSQL constraints. Star
 connectivity and the packaged supported revision; it does not reconstruct the schema from
 application catalogs or certify manual schema drift. Legacy adoption alone retains a
 frozen migration-only compatibility check. Schema changes must use explicit migrations.
+
+## CRUD/database API alignment
+
+HTTP controllers and middleware orchestrate independent services. Services own monetary or
+idempotency lifecycle decisions and call their matching app/crud modules. CRUD owns explicit
+parameterized SQL; app/db/database.py owns query execution, cursor cleanup, shared connection
+types, pool ownership, transactions/savepoints and operation budgets. Readiness uses the same
+database API. Alembic SQL remains migration-owned. There is one bounded pool and no ORM.
+
+Idempotency resolution acquires one guard and freshly checks the generation/owner once,
+validates the durable receipt, then conditionally publishes or deletes under that lock. NOWAIT
+failures roll back only a database-owned savepoint. Busy/active owners remain processing;
+recovery never executes payments. Controllers call fencing, payments and receipt recording
+independently in business transaction B, between admission A and publication A.
