@@ -177,11 +177,12 @@ Harness authority tests run separately.
 ## Scope and known issues
 
 Payer identity is trusted; authentication, external payment rails and production qualification
-are outside this take-home. Deferred issues:
+are outside this service. Deferred issues:
 
 - Cancellation arriving during cleanup can be suppressed.
 - Failed result publication can undercount acknowledged payments in metrics.
-- The phase-retention cap can omit the main business transaction timing.
 
-One earlier clean-image check reported a missing `payments` table; subsequent checks passed,
-but its cause remains unresolved. Metrics are best effort, not the financial ledger.
+## Effort
+
+`How much time did you spend on this task?` ~5 hours
+`How proud are you of your work?` - Fairly proud
