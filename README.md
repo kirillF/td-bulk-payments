@@ -117,3 +117,7 @@ A compatible database created by the former bootstrap can be adopted without cha
 its financial records or sequence state. Partial or incompatible application schemas
 are rejected; do not bypass this with an unconditional `alembic stamp`. Concurrent
 upgrades serialize before version inspection and fail on the finite migration lock bound.
+
+Startup validates both application structure and the packaged Alembic head. Missing,
+older or unknown revision state prevents the service from serving requests; run the
+approved upgrade first. Migration execution never occurs inside a payment handler.

@@ -82,3 +82,8 @@ oracle as async service startup. Columns, identities, validated constraints, UUI
 index/collation and timestamp defaults must match. A failed head-recording transaction
 preserves legacy rows and leaves no new version state. Investigate mismatches rather
 than changing or stamping a financial database automatically.
+
+An initialization error for unsupported revision means the service has not entered its
+serving lifespan. Check the deployed revision resources and explicit upgrade outcome;
+do not bypass the gate with a blind stamp. Readiness only probes the already-initialized
+service and database availability; it does not execute migrations or create records.

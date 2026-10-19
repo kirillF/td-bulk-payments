@@ -180,6 +180,13 @@ def remove_fault(url):
 
 
 def migration_given(ctx, step):
+    prefix = "a structurally compatible database whose recorded revision is "
+    if step.startswith(prefix):
+        ctx.migration_url = ctx.stack.enter_context(new_database(ctx.db))
+        unsupported_revision(ctx.migration_url, step.removeprefix(prefix))
+        ctx.migration_before = state(ctx.migration_url)
+        return True
+
     if (
         step
         == "a complete compatible legacy schema with firms, payments and durable request results"
@@ -226,6 +233,11 @@ def migration_given(ctx, step):
 
 
 def migration_when(ctx, step):
+    if step == "the service attempts to start":
+        assert_startup_rejected(ctx.migration_url)
+        ctx.migration_startup_rejected = True
+        return True
+
     if step == "Alembic attempts to upgrade the database":
         with pytest.raises(CommandError):
             migrate(ctx.migration_url)
@@ -254,6 +266,13 @@ def migration_when(ctx, step):
 
 
 def migration_then(ctx, step):
+    if step == "initialization fails before payment requests can be served":
+        assert ctx.migration_startup_rejected
+        return True
+    if step == "no financial or idempotency records are changed":
+        assert state(ctx.migration_url) == ctx.migration_before
+        return True
+
     if step == "the head revision is recorded only after compatibility verification":
         assert state(ctx.migration_url)["versions"] == [(head(),)]
         preserved(state(ctx.migration_url), ctx.migration_before)
@@ -486,3 +505,35 @@ def test_failed_revision_recording_preserves_legacy_financial_data(database_url)
         migrate(url)
         preserved(state(url), before)
         verify_replay(url, body, response)
+
+
+def unsupported_revision(url, revision):
+    migrate(url)
+    seed_history(url)
+    with psycopg.connect(url) as connection:
+        if revision == "missing":
+            connection.execute("DROP TABLE alembic_version")
+        elif revision == "empty":
+            connection.execute("DELETE FROM alembic_version")
+        else:
+            connection.execute(
+                "UPDATE alembic_version SET version_num=%s",
+                ("0000_older" if revision == "older" else "unknown_future",),
+            )
+
+
+def assert_startup_rejected(url):
+    from .conftest import running_app
+
+    with pytest.raises(ValueError, match="Unsupported database revision"):
+        with running_app(url):
+            pytest.fail("Unsupported migration revision must not serve requests")
+
+
+@pytest.mark.parametrize("revision", ["missing", "empty", "older", "unknown"])
+def test_startup_rejects_unsupported_revision_without_effects(database_url, revision):
+    with new_database(database_url) as url:
+        unsupported_revision(url, revision)
+        before = state(url)
+        assert_startup_rejected(url)
+        assert state(url) == before

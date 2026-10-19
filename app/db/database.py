@@ -295,7 +295,27 @@ async def validate_schema(connection: AsyncConnection[DictRow]) -> None:
         try:
             query = checks.send(rows)
         except StopIteration:
-            return
+            break
+
+    await validate_revision(connection)
+
+
+async def validate_revision(connection: AsyncConnection[DictRow]) -> None:
+    from alembic.script import ScriptDirectory
+
+    from app.db.migrate import migration_config
+
+    expected = ScriptDirectory.from_config(migration_config()).get_current_head()
+    if expected is None:
+        raise ValueError("Packaged migration head is missing")
+    present = await (
+        await connection.execute("SELECT to_regclass('alembic_version') IS NOT NULL AS valid")
+    ).fetchone()
+    if not present or not present["valid"]:
+        raise ValueError("Unsupported database revision; run migrations before startup")
+    rows = await (await connection.execute("SELECT version_num FROM alembic_version")).fetchall()
+    if rows != [{"version_num": expected}]:
+        raise ValueError("Unsupported database revision; run migrations before startup")
 
 
 def validate_schema_sync(connection: psycopg.Connection[Any]) -> None:
