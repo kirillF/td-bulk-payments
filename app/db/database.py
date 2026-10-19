@@ -23,9 +23,12 @@ OPERATION_END: ContextVar[float | None] = ContextVar("payment_operation_end", de
 
 
 @asynccontextmanager
-async def operation_scope(pool: Pool) -> AsyncIterator[None]:
+async def operation_scope(pool: Pool, budget_ms: int | None = None) -> AsyncIterator[None]:
     """One absolute budget shared by every sequential checkout in a request."""
-    end = asyncio.get_running_loop().time() + pool.settings.operation_budget_ms / 1000
+    end = (
+        asyncio.get_running_loop().time()
+        + (budget_ms if budget_ms is not None else pool.settings.operation_budget_ms) / 1000
+    )
     token = OPERATION_END.set(end)
     try:
         async with asyncio.timeout_at(end):

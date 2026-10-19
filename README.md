@@ -144,3 +144,16 @@ one 1–128 character ASCII letters/digits/dot/underscore/hyphen token; malforme
 values are replaced. Every application HTTP response returns it and a fresh `X-Request-ID`.
 `PAYMENTS_LOG_LEVEL=INFO` records request arrival/status and classified failures; `DEBUG`
 adds bounded stage and insert-ordinal events. Financial payloads and raw errors are excluded.
+
+Idempotency responses are retained for exactly24 hours from completed publication using
+PostgreSQL time; replay does not extend expiry. A safely expired key can execute a new
+payment. Unresolved/active processing entries cannot be reclaimed from age alone.
+For bounded receipt reconciliation and expired-key cleanup, run explicitly:
+
+```sh
+python -m app.db.idempotency_maintenance --batch-size 100 --max-batches 10 --timeout-seconds 10
+```
+
+The command never executes payments. It publishes committed receipts, fences abandoned
+claims with no effects, skips busy guards and retains corrupt records with a nonzero exit.
+Its numeric arguments are operator-selected bounds, not throughput guarantees.

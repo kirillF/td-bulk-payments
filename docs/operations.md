@@ -122,3 +122,33 @@ locks, writes, receipt, commit, publication and cleanup stages. Insert progress 
 only ordinals. Producer snapshots preserve correlation through async cancellation/cleanup;
 background lifecycle events do not inherit prior request context. Malformed correlation
 headers are replaced rather than logged. Sinks remain bounded and can drop records.
+
+## Idempotency recovery and retention
+
+A matching processing409 means retry the same key later; it does not authorize using a
+new key. A crash after the financial commit can leave a durable receipt while the request
+still appears processing. A retry or the explicit maintenance command publishes that
+receipt without executing payments again. Without a receipt, only an abandoned owner
+whose guard is available can be fenced and released. Resumed old owners cannot execute
+or publish into a replacement generation.
+
+Completed results expire24 hours after their first completed publication, measured by
+PostgreSQL. Replays retain their original expiry. At/after safely resolved expiry, key reuse
+is a new payment intent and may create another payment. Active or unresolved generations
+are retained even past expiry. Do not delete lifecycle rows with an age-only query.
+
+```sh
+python -m app.db.idempotency_maintenance --batch-size 100 --max-batches 10 --timeout-seconds 10
+```
+
+All three arguments are required, positive and finite. The command examines at most
+batch-size times max-batches candidates, advances through timestamp/generation order and
+skips unavailable guards without spinning. The explicit time allowance reserves20 percent
+for shutdown. Server-side timeouts remain independent backstops. Include this separate
+process in the deployment connection budget; there is no automatic scheduler.
+
+Output contains only aggregate completed/released/deleted/skipped/unresolved counts,
+examined candidates and batches. Corrupt records remain in place and make the command exit
+nonzero; command failures return a generic safe diagnostic. Inspect retained corruption
+with authorized operator tooling and use an explicit repair decision. Payment rows and
+balances are never modified by maintenance or lifecycle cleanup.

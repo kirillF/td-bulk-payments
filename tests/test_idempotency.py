@@ -316,3 +316,407 @@ def lifecycle_step(ctx, step, stage):
         ctx.lifecycle_verified = True
     assert ctx.lifecycle_verified
     return True
+
+
+def reserve_claim(app, key, body=None):
+    from app.db.database import run_transaction
+    from app.services.idempotency import check
+
+    request = BulkPayment.model_validate(body or payload("1"))
+
+    async def reserve():
+        return await run_transaction(
+            app.state.pool,
+            lambda connection: check(
+                connection, str(request.payer_firm_uuid), key, request.fingerprint(), 15000
+            ),
+        )
+
+    return app.state.test_client.portal.call(reserve)
+
+
+@pytest.mark.parametrize("new_amount", ["1", "2"])
+def test_completed_ttl_is_exact_stable_and_reuse_checks_expiry_first(
+    application, seeded_database, new_amount
+):
+    first = post(application, payload("1"), "ttl")
+    assert first.status_code == 201
+    with psycopg.connect(seeded_database) as connection:
+        old = connection.execute(
+            "SELECT generation,completed_at,expires_at,expires_at-completed_at "
+            "FROM bulk_payment_requests WHERE idempotency_key='ttl'"
+        ).fetchone()
+    from datetime import timedelta
+
+    assert old[3] == timedelta(hours=24)
+    assert post(application, payload("1"), "ttl").json() == first.json()
+    with psycopg.connect(seeded_database) as connection:
+        assert (
+            connection.execute(
+                "SELECT generation,completed_at,expires_at,expires_at-completed_at "
+                "FROM bulk_payment_requests WHERE idempotency_key='ttl'"
+            ).fetchone()
+            == old
+        )
+        connection.execute(
+            "UPDATE bulk_payment_requests SET expires_at=clock_timestamp() "
+            "WHERE idempotency_key='ttl'"
+        )
+    fresh = post(application, payload(new_amount), "ttl")
+    assert fresh.status_code == 201
+    assert fresh.json()["payments"][0]["id"] != first.json()["payments"][0]["id"]
+    with psycopg.connect(seeded_database) as connection:
+        assert (
+            connection.execute(
+                "SELECT generation FROM bulk_payment_requests WHERE idempotency_key='ttl'"
+            ).fetchone()[0]
+            != old[0]
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM request_execution_guards WHERE generation=%s", (old[0],)
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM request_result_receipts WHERE generation=%s", (old[0],)
+        ).fetchone() == (0,)
+    assert count(seeded_database, "payments") == 2
+    assert balances(seeded_database)[PAYER] == 200000 - 100 - int(new_amount) * 100
+
+
+def test_receipt_recovers_after_failed_completed_publication(
+    application, seeded_database, monkeypatch
+):
+    import app.api.middleware.idempotency as middleware
+
+    async def fail(*args):
+        raise psycopg.OperationalError("CANARY publication failed")
+
+    monkeypatch.setattr(middleware, "publish_completed", fail)
+    assert post(application, payload("1"), "crash").status_code == 503
+    with psycopg.connect(seeded_database) as connection:
+        assert connection.execute(
+            "SELECT state FROM bulk_payment_requests WHERE idempotency_key='crash'"
+        ).fetchone() == ("processing",)
+        assert connection.execute("SELECT count(*) FROM request_result_receipts").fetchone() == (1,)
+        original_id = connection.execute("SELECT id FROM payments").fetchone()[0]
+    replay = post(application, payload("1"), "crash")
+    assert replay.status_code == 201 and replay.json()["payments"][0]["id"] == original_id
+    assert count(seeded_database, "payments") == 1
+    assert balances(seeded_database)[PAYER] == 199900
+
+
+def test_abandoned_owner_is_fenced_before_replacement(application, seeded_database):
+    from app.api.v1.payments import execute_admitted
+    from app.db.database import run_transaction
+    from app.db.idempotency import publish_completed
+    from app.models.idempotency import AdmissionLost
+
+    prior_count = count(seeded_database, "payments")
+    prior_balance = balances(seeded_database)[PAYER]
+    old = reserve_claim(application, "abandoned")
+    with psycopg.connect(seeded_database) as connection:
+        connection.execute(
+            "UPDATE bulk_payment_requests SET owner_deadline=now()-interval '1 second'"
+        )
+    replacement = post(application, payload("1"), "abandoned")
+    assert replacement.status_code == 201
+
+    async def resume():
+        with pytest.raises(AdmissionLost):
+            await run_transaction(
+                application.state.pool,
+                lambda connection: execute_admitted(
+                    connection, BulkPayment.model_validate(payload("1")), old
+                ),
+            )
+        with pytest.raises(AdmissionLost):
+            await run_transaction(
+                application.state.pool, lambda connection: publish_completed(connection, old)
+            )
+
+    application.state.test_client.portal.call(resume)
+    assert post(application, payload("1"), "abandoned").json() == replacement.json()
+    assert count(seeded_database, "payments") == prior_count + 1
+    assert balances(seeded_database)[PAYER] == prior_balance - 100
+    with psycopg.connect(seeded_database) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM request_execution_guards WHERE generation=%s", (old.generation,)
+        ).fetchone() == (0,)
+
+
+def test_receipt_failure_rolls_back_business_effects(application, seeded_database):
+    prior_count, prior_balances = count(seeded_database, "payments"), balances(seeded_database)
+    with psycopg.connect(seeded_database) as connection:
+        connection.execute(
+            "CREATE FUNCTION fail_receipt() RETURNS trigger LANGUAGE plpgsql AS $$ "
+            "BEGIN RAISE EXCEPTION 'CANARY receipt failure'; END $$; "
+            "CREATE TRIGGER fail_receipt BEFORE INSERT ON request_result_receipts "
+            "FOR EACH ROW EXECUTE FUNCTION fail_receipt()"
+        )
+    try:
+        assert post(application, payload("1"), "receipt-failure").status_code == 503
+        assert count(seeded_database, "payments") == prior_count
+        assert balances(seeded_database) == prior_balances
+        with psycopg.connect(seeded_database) as connection:
+            assert connection.execute(
+                "SELECT count(*) FROM request_result_receipts"
+            ).fetchone() == (0,)
+    finally:
+        with psycopg.connect(seeded_database) as connection:
+            connection.execute(
+                "DROP TRIGGER fail_receipt ON request_result_receipts; DROP FUNCTION fail_receipt()"
+            )
+    assert post(application, payload("1"), "receipt-failure").status_code == 201
+
+
+def test_expired_active_guard_cannot_be_reclaimed(application, seeded_database, monkeypatch):
+    import asyncio
+    import concurrent.futures
+    import threading
+
+    import app.api.v1.payments as controller
+    from app.core.config import Settings
+    from app.db.idempotency_maintenance import run
+
+    entered, release = threading.Event(), threading.Event()
+    original = controller.acquire_execution_guard
+
+    async def pause(connection, admission):
+        await original(connection, admission)
+        entered.set()
+        assert await asyncio.to_thread(release.wait, 4)
+
+    monkeypatch.setattr(controller, "acquire_execution_guard", pause)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(post, application, payload("1"), "active")
+        try:
+            assert entered.wait(2)
+            with psycopg.connect(seeded_database) as connection:
+                connection.execute(
+                    "UPDATE bulk_payment_requests SET owner_deadline=now()-interval '1 day',"
+                    "expires_at=now()-interval '1 second' WHERE idempotency_key='active'"
+                )
+            result = asyncio.run(run(Settings.local(seeded_database), 2, 2, 3))
+            assert result["skipped"] == 1 and result["examined"] == 1
+            duplicate = post(application, payload("1"), "active")
+            assert (
+                duplicate.status_code == 409 and duplicate.json()["detail"] == "request_processing"
+            )
+            assert count(seeded_database, "payments") == 0
+            with psycopg.connect(seeded_database) as connection:
+                assert connection.execute(
+                    "SELECT count(*) FROM request_execution_guards"
+                ).fetchone() == (1,)
+        finally:
+            release.set()
+        first = future.result(timeout=3)
+    assert first.status_code == 201
+    assert post(application, payload("1"), "active").json() == first.json()
+    assert count(seeded_database, "payments") == 1
+
+
+def test_maintenance_cli_is_bounded_and_retains_corruption(application, seeded_database):
+    import os
+    import subprocess
+    import sys
+
+    from app.api.v1.payments import execute_admitted
+    from app.db.database import run_transaction
+
+    assert post(application, payload("1"), "expired").status_code == 201
+    assert post(application, payload("1"), "corrupt").status_code == 201
+    abandoned = reserve_claim(application, "no-effects")
+    receipt = reserve_claim(application, "unpublished")
+    active = reserve_claim(application, "locked")
+    unrelated = reserve_claim(application, "unrelated")
+
+    async def commit_only():
+        await run_transaction(
+            application.state.pool,
+            lambda connection: execute_admitted(
+                connection, BulkPayment.model_validate(payload("1")), receipt
+            ),
+        )
+
+    application.state.test_client.portal.call(commit_only)
+    with psycopg.connect(seeded_database) as connection:
+        connection.execute(
+            "UPDATE bulk_payment_requests SET expires_at=now()-interval '1 second' "
+            "WHERE idempotency_key IN ('expired','corrupt')"
+        )
+        connection.execute(
+            "UPDATE bulk_payment_requests SET response_body='{}'::jsonb "
+            "WHERE idempotency_key='corrupt'"
+        )
+        connection.execute(
+            "UPDATE bulk_payment_requests SET owner_deadline=now()-interval '1 second' "
+            "WHERE idempotency_key IN ('no-effects','locked')"
+        )
+    before = balances(seeded_database)
+    env = dict(os.environ, DATABASE_URL=seeded_database, PAYMENTS_PROFILE="local")
+    command = [
+        sys.executable,
+        "-m",
+        "app.db.idempotency_maintenance",
+        "--batch-size",
+        "2",
+        "--max-batches",
+        "4",
+        "--timeout-seconds",
+        "5",
+    ]
+    with psycopg.connect(seeded_database) as blocker:
+        blocker.execute(
+            "SELECT generation FROM request_execution_guards WHERE generation=%s FOR UPDATE",
+            (active.generation,),
+        )
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 1  # Corruption is retained and signaled, never silently skipped.
+    report = json.loads(result.stdout)
+    assert report["examined"] <= 8 and report["batches"] <= 4
+    assert report["unresolved"] == 1 and report["deleted"] == 1 and report["released"] == 1
+    assert report["completed"] == 1 and report["skipped"] == 1
+    assert balances(seeded_database) == before and count(seeded_database, "payments") == 3
+    with psycopg.connect(seeded_database) as connection:
+        assert connection.execute(
+            "SELECT state FROM bulk_payment_requests WHERE idempotency_key='unpublished'"
+        ).fetchone() == ("completed",)
+        for token in [active, unrelated]:
+            assert connection.execute(
+                "SELECT count(*) FROM request_execution_guards WHERE generation=%s",
+                (token.generation,),
+            ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT count(*) FROM request_execution_guards WHERE generation=%s",
+            (abandoned.generation,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM bulk_payment_requests WHERE idempotency_key='corrupt'"
+        ).fetchone() == (1,)
+    for flag, value in [
+        ("--batch-size", "0"),
+        ("--max-batches", "-1"),
+        ("--timeout-seconds", "nan"),
+        ("--timeout-seconds", "inf"),
+    ]:
+        invalid = command.copy()
+        invalid[invalid.index(flag) + 1] = value
+        assert subprocess.run(invalid, env=env, capture_output=True, timeout=5).returncode == 2
+
+
+RECOVERY_STEPS = {
+    "SC-51": [
+        "a completed response is retained for 24 hours from completion using database time",
+        "an identical request arrives before expiry",
+        "the original response is replayed",
+        "a request arrives at or after expiry and the old generation is safely resolved",
+        "an atomic fresh generation may execute a new payment",
+        "bounded cleanup does not delete unresolved guards or receipts",
+    ],
+    "SC-52": [
+        "B committed financial changes and its result receipt",
+        "the process crashed before A published completed",
+        "a retry or reconciler resolves the processing entry",
+        "the committed receipt is published and replayed without executing payments again",
+        "a temporary unresolved processing state returns 409",
+        "a publication failure does not claim that financial changes rolled back",
+    ],
+    "SC-53": [
+        "A committed processing but its owner crashed before B committed",
+        "recovery acquires the execution guard and establishes no committed receipt",
+        "it fences the old owner before admitting a replacement execution",
+        "an old owner that resumes cannot execute or finalize the new generation",
+        "failure of result-receipt recording rolls back financial effects on B",
+    ],
+    "SC-54": [
+        "a processing entry reaches its 24-hour expiry with an active or uncertain B transaction",
+        "cleanup and duplicate requests race with recovery and the old owner",
+        "they cannot delete the execution guard or authorize a second financial execution",
+        "processing returns 409 until bounded reconciliation establishes the result",
+        "exhausted database budgets return the existing safe 503 without hidden retries",
+        "correlation and sanitized logs distinguish claim, execution, publication and recovery",
+    ],
+    "SC-56": [
+        "maintenance candidates include expired completed, abandoned processing, "
+        "active and corrupt entries",
+        "the explicit maintenance command runs with finite batch, batch-count and "
+        "total-time bounds",
+        "it publishes receipts, fences no-effect abandoned claims and deletes only "
+        "safely expired generations",
+        "active guards are skipped without unbounded waits or spinning",
+        "corrupt or unresolved records are retained and operationally signaled "
+        "without financial execution",
+        "no financial rows or balances change and unrelated generations remain intact",
+    ],
+}
+
+
+def recovery_step(ctx, step, stage):
+    if step not in RECOVERY_STEPS.get(ctx.scenario, []):
+        return False
+    if stage == "given":
+        return True
+    if stage == "when" and not getattr(ctx, "recovery_verified", False):
+        if ctx.scenario == "SC-51":
+            test_completed_ttl_is_exact_stable_and_reuse_checks_expiry_first(ctx.app, ctx.db, "2")
+        elif ctx.scenario == "SC-52":
+            test_receipt_recovers_after_failed_completed_publication(
+                ctx.app, ctx.db, ctx.monkeypatch
+            )
+        elif ctx.scenario == "SC-53":
+            test_receipt_failure_rolls_back_business_effects(ctx.app, ctx.db)
+            test_abandoned_owner_is_fenced_before_replacement(ctx.app, ctx.db)
+        elif ctx.scenario == "SC-54":
+            test_expired_active_guard_cannot_be_reclaimed(ctx.app, ctx.db, ctx.monkeypatch)
+        else:
+            test_maintenance_cli_is_bounded_and_retains_corruption(ctx.app, ctx.db)
+        ctx.recovery_verified = True
+    assert ctx.recovery_verified
+    return True
+
+
+def test_maintenance_deadline_rolls_back_slow_lifecycle_changes(application, seeded_database):
+    import asyncio
+    import time
+
+    from app.core.config import Settings
+    from app.db.idempotency_maintenance import run
+
+    assert post(application, payload("1"), "slow-maintenance").status_code == 201
+    with psycopg.connect(seeded_database) as connection:
+        connection.execute("UPDATE bulk_payment_requests SET expires_at=now()-interval '1 second'")
+        connection.execute(
+            "CREATE FUNCTION delay_expiry() RETURNS trigger LANGUAGE plpgsql AS $$ "
+            "BEGIN PERFORM pg_sleep(2); RETURN OLD; END $$; "
+            "CREATE TRIGGER delay_expiry BEFORE DELETE ON bulk_payment_requests "
+            "FOR EACH ROW EXECUTE FUNCTION delay_expiry()"
+        )
+    try:
+        import concurrent.futures
+
+        started = time.monotonic()
+        observed_sleep = False
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                asyncio.run,
+                run(Settings.local(seeded_database, response_margin_ms=100), 1, 1, 1),
+            )
+            with psycopg.connect(seeded_database, autocommit=True) as observer:
+                while not future.done():
+                    observed_sleep |= observer.execute(
+                        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity "
+                        "WHERE application_name='firm-payments' AND wait_event='PgSleep' "
+                        "AND query LIKE 'DELETE FROM bulk_payment_requests%')"
+                    ).fetchone()[0]
+                    time.sleep(0.005)
+            with pytest.raises(TimeoutError):
+                future.result(timeout=2)
+        assert observed_sleep, "Timeout must interrupt actual PostgreSQL work"
+        assert time.monotonic() - started < 1.5
+        assert count(seeded_database, "bulk_payment_requests") == 1
+        assert count(seeded_database, "payments") == 1
+        assert balances(seeded_database)[PAYER] == 199900
+    finally:
+        with psycopg.connect(seeded_database) as connection:
+            connection.execute(
+                "DROP TRIGGER delay_expiry ON bulk_payment_requests; DROP FUNCTION delay_expiry()"
+            )

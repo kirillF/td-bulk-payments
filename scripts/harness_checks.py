@@ -171,7 +171,7 @@ def main() -> None:
                 "pytest",
                 "-q",
                 "tests/test_journeys.py",
-                "--scenarios=SC-11,SC-12,SC-13",
+                "--scenarios=SC-11,SC-12,SC-13,SC-49,SC-54",
             ],
             cwd=ROOT,
             check=True,
@@ -230,7 +230,8 @@ def main() -> None:
                 "pytest",
                 "-q",
                 "tests/test_journeys.py",
-                "--scenarios=SC-7,SC-8,SC-9,SC-10,SC-16,SC-48,SC-49,SC-50,SC-57",
+                "--scenarios=SC-7,SC-8,SC-9,SC-10,SC-16,SC-48,SC-49,SC-50,"
+                "SC-51,SC-52,SC-53,SC-54,SC-56,SC-57",
             ],
             cwd=ROOT,
             check=True,

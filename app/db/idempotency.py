@@ -35,8 +35,8 @@ async def claim(
             "INSERT INTO bulk_payment_requests "
             "(payer_firm_uuid,idempotency_key,request_fingerprint,state,generation,owner_token,"
             "owner_deadline,expires_at) VALUES (%s,%s,%s,'processing',%s,%s,"
-            "clock_timestamp()+(%s * interval '1 millisecond'),"
-            "clock_timestamp()+interval '24 hours') "
+            "now()+(%s * interval '1 millisecond'),"
+            "now()+interval '24 hours') "
             "ON CONFLICT (payer_firm_uuid,idempotency_key) DO NOTHING RETURNING generation",
             (payer, key, fingerprint, admission.generation, admission.owner, budget_ms),
         )
@@ -145,7 +145,7 @@ async def publish_completed(
         return result
     await connection.execute(
         "UPDATE bulk_payment_requests SET state='completed',status_code=%s,response_body=%s,"
-        "completed_at=clock_timestamp(),expires_at=clock_timestamp()+interval '24 hours' "
+        "completed_at=statement_timestamp(),expires_at=statement_timestamp()+interval '24 hours' "
         "WHERE generation=%s AND owner_token=%s AND state='processing'",
         (result.status_code, Jsonb(result.body), admission.generation, admission.owner),
     )
@@ -209,3 +209,61 @@ async def try_release_abandoned(connection: AsyncConnection[DictRow], admission:
             return True
     except LockNotAvailable:
         return False
+
+
+@instrument("recovery.resolve")
+async def reconcile(connection: AsyncConnection[DictRow], admission: Admission) -> str:
+    """One nonblocking generation resolution; never executes financial work."""
+    try:
+        async with connection.transaction():
+            guard = await (
+                await connection.execute(
+                    "SELECT generation FROM request_execution_guards "
+                    "WHERE generation=%s FOR UPDATE NOWAIT",
+                    (admission.generation,),
+                )
+            ).fetchone()
+            row = await find(connection, admission.payer_uuid, admission.key)
+            if row is None or identity(row) != admission:
+                return "skipped"
+            if guard is None:
+                raise StoredResultInvalid("Request generation has no execution guard")
+            committed = await receipt(connection, admission)
+            if row["state"] == "completed":
+                if committed is None or committed != cached(row):
+                    raise StoredResultInvalid("Completed generation has invalid receipt")
+                if not row["expired"]:
+                    return "skipped"
+                await connection.execute(
+                    "DELETE FROM bulk_payment_requests WHERE generation=%s AND owner_token=%s",
+                    (admission.generation, admission.owner),
+                )
+                return "deleted"
+            if row["state"] != "processing":
+                raise StoredResultInvalid("Invalid request lifecycle state")
+            if committed is not None:
+                await publish_completed(connection, admission)
+                return "completed"
+            if row["abandoned"]:
+                await release_failed(connection, admission)
+                return "released"
+            return "skipped"
+    except LockNotAvailable:
+        return "skipped"
+
+
+async def candidates(
+    connection: AsyncConnection[DictRow], limit: int, cursor: tuple[object, object] | None
+) -> list[DictRow]:
+    where = " AND (r.expires_at,r.generation)>(%s,%s)" if cursor else ""
+    return await (
+        await connection.execute(
+            "SELECT r.* FROM bulk_payment_requests r WHERE "
+            "((r.state='completed' AND r.expires_at<=clock_timestamp()) OR "
+            "(r.state='processing' AND (r.owner_deadline<=clock_timestamp() OR EXISTS "
+            "(SELECT 1 FROM request_result_receipts x WHERE x.generation=r.generation))))"
+            + where
+            + " ORDER BY r.expires_at,r.generation LIMIT %s",
+            (*cursor, limit) if cursor else (limit,),
+        )
+    ).fetchall()

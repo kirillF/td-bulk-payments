@@ -19,6 +19,18 @@ async def check(
     previous = await storage.find(connection, payer, key)
     if previous is None:
         return Processing()  # A concurrent fenced deletion won; a later request may claim.
+    if previous["expired"]:
+        resolved = await storage.reconcile(connection, storage.identity(previous))
+        if resolved in {"deleted", "released"}:
+            return (
+                await storage.claim(connection, payer, key, fingerprint, budget_ms) or Processing()
+            )
+        if resolved == "completed":
+            previous = await storage.find(connection, payer, key)
+            if previous is None:
+                return Processing()
+        else:
+            return Processing()
     if previous["request_fingerprint"] != fingerprint:
         return Conflict()
     if previous["state"] == "completed":
