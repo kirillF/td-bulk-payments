@@ -171,7 +171,10 @@ def test_final_http_samples():
         endpoint = service["http_url"] + "/v1/bulk-payments"
         for exact in [False, True]:
             with psycopg.connect(url) as connection:
-                connection.execute("TRUNCATE payments,bulk_payment_requests,firms RESTART IDENTITY")
+                connection.execute(
+                    "TRUNCATE request_result_receipts,request_execution_guards,"
+                    "payments,bulk_payment_requests,firms RESTART IDENTITY"
+                )
                 if exact:
                     connection.execute((ROOT / "examples/firms.sql").read_text())
                 else:
