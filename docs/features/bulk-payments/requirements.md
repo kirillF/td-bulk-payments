@@ -25,10 +25,10 @@ identity in the request. Platform balance initialization is external to the paym
 | FR-2 | Resolve every involved firm. Unknown payer or payee returns 422 with no monetary changes. Self-payments return 422. Repeated payees are allowed; persist every entry and aggregate its credits. |
 | FR-3 | Compare the payer's locked balance with the sum of the entire batch. Insufficient funds denies the entire batch with 422. Spending the exact available balance is permitted. |
 | FR-4 | For an accepted batch, insert all payments with correct payer/payee IDs, cents and descriptions, debit the payer once by the total, credit all recipients, commit, and return 201. The response reports `payments_created`, `total_amount_cents`, and the complete list of created payments with their generated IDs, public payer/payee UUIDs, exact cents and descriptions in request order. Idempotent replay preserves that list and its IDs. |
-| FR-5 | Require a case-sensitive `Idempotency-Key` scoped to the payer. An identical normalized request under that key executes at most once and replays the original status and response, including across instances and after a lost response. |
-| FR-6 | Reusing a payer/key with different normalized content returns 409 without additional monetary effects. Money strings and UUIDs are normalized; JSON object order is irrelevant, while payment list order and exact descriptions are significant. Different payers may use the same key independently. |
-| FR-7 | Persist business rejections, including insufficient-funds 422, for replay. A later top-up does not change that key's outcome; a new attempt needs a new key. No automatic key expiration is provided. |
-| FR-8 | SQL failure or timeout rolls back all uncommitted effects and the key reservation, returns 503 with `Retry-After: 1`, and permits retry with the same key. If commit acknowledgement is lost, replay or one new execution must resolve the uncertainty safely. A 503 cannot promise that a commit never occurred. |
+| FR-5 | Require a case-sensitive Idempotency-Key scoped to the payer. During one retained request generation at most one monetary execution commits. Completed identical requests replay their original status/body/IDs across instances; processing identical requests return 409 without execution. |
+| FR-6 | Different normalized content under an unexpired payer/key returns 409 without effects. Normalize money and UUIDs; JSON object order is irrelevant, payment order and sanitized descriptions significant. Different payers have independent key namespaces. After safe expiry, a new generation may use the key. |
+| FR-7 | Persist business rejections for stable replay despite later balance changes. Processing entries expire after 24 hours from creation; completed cache entries after 24 hours from first completion publication, using database time. Replays do not extend TTL. Safe expired-key reuse is a new attempt and may pay again; unresolved active/uncertain operations cannot be erased or repeated by TTL. |
+| FR-8 | Infrastructure failure returns safe 503 with Retry-After: 1 and no uncommitted monetary effects. A separately committed processing claim may remain until bounded recovery. If B committed, failure to publish completed on A must not permit duplicate effects. Same-key recovery resolves the durable result or fences an abandoned no-effect owner before another execution; 503 never promises commit did not occur. |
 | FR-9 | Use exact integer-cent arithmetic and reject malformed amounts or any individual amount/resulting balance outside the supplied signed 32-bit INTEGER range. Reject recipient overflow with 422 and no monetary changes. No rounding or binary floating-point conversion. |
 
 ## Schema lifecycle requirements
@@ -44,6 +44,24 @@ product requirements.
 | FR-12 | Repeated and concurrent upgrade requests must produce one consistent supported schema/revision state without duplicate DDL or data loss. If an upgrade fails, its schema and revision changes roll back together and a later retry can safely proceed. |
 | FR-13 | Service startup requires both a compatible application schema and the revision supported by that service version. A missing, older or unknown revision prevents startup; a healthy database connection alone cannot waive this check. |
 | FR-14 | Initial migration adoption does not authorize destructive schema repair, data reset or downgrade. Unsupported destructive downgrade requests fail without changing application data or the recorded revision. |
+
+## Correlation, logging, configuration and request lifecycle
+
+These obligations extend operational visibility and separate middleware coordination from
+monetary logic. Concrete protocol values and representation belong in architecture/program
+design, not requirements inferred from tests.
+
+| ID | Requirement |
+| --- | --- |
+| FR-15 | Accept an optional case-insensitive HTTP `X-Correlation-ID` header. Preserve one valid supplied value and return it in the response. Generate a value when absent. Apply this to application-handled HTTP requests, including validation failures, unknown routes and sanitized server errors. |
+| FR-16 | Propagate the effective correlation ID through controller, services and database operations, including owned async work and cleanup. Isolate concurrent requests and reset context after completion. Retain a fresh server-generated `X-Request-ID` for every attempt and existing W3C trace semantics. |
+| FR-17 | Correlation metadata does not affect request normalization, idempotency identity, stored response bodies or monetary decisions. Replays use the current attempt's headers and retain original payment IDs/body. |
+| FR-18 | Idempotency middleware claims or resolves request entries on connection A. It returns cached completed responses or 409 for processing entries; only a newly claimed request reaches the controller. The controller orchestrates monetary execution on connection B. Neither the checker nor payment service calls the other. |
+| FR-19 | An atomic claim creates a processing entry. Completed entries replay their validated cached result; changed fingerprints return 409. Entries have the 24-hour retention and safe expiry semantics in FR-7. Dual-connection failure must never repeat a committed monetary operation. Corrupt or unresolved results fail closed. |
+| NFR-9 | A dedicated structured application logger emits request arrival and completion/status at INFO by default, plus classified operational failures at WARNING/ERROR. It provides DEBUG events for each processing stage, including storage operations, with consistent correlation. Expected business/validation rejection is an outcome, not an internal error. |
+| NFR-10 | Log severity threshold is deployment-configurable. DEBUG enables verbose processing visibility; INFO avoids routine processing-step noise. All levels exclude bodies, descriptions, monetary values, firm/payment identifiers, raw idempotency keys, credentials, raw SQL/parameters and raw driver exception text. Correlation IDs are untrusted operational metadata, never authority. |
+| NFR-11 | Configuration is represented and validated by Pydantic BaseSettings at startup, including database budgets, logging and telemetry. Preserve existing environment names, environment-over-local-dotenv precedence, literal dotenv values and explicit configured-profile budgets. Invalid configuration fails before serving requests, without exposing secrets. Explicit test configuration must not read ambient configuration. |
+| NFR-12 | Logging has bounded queues, nonblocking request-side submission and finite shutdown. Failure, saturation or filtering must not change transaction outcomes or operation budgets. Report dropped telemetry through the existing operational signals. Correlation IDs must not become metric labels. |
 
 ## Proposed limits and validation details
 
@@ -92,8 +110,9 @@ unknown schema. Future schema/fingerprint evolution requires an explicit compati
 - INV-2: Successful transfers conserve the total balance of participating firms; all firm
   balances remain nonnegative and within INTEGER range.
 - INV-3: Money representation is exact integer cents throughout validation and persistence.
-- INV-4: One payer/key produces at most one committed set of monetary effects and a stable
-  durable result. Changed content cannot silently reuse that key.
+- INV-4: One retained payer/key generation produces at most one committed set of monetary
+  effects and a stable durable result. Changed content cannot reuse an unexpired key.
+  Safely expired key reuse starts a new generation, not a replay guarantee.
 - INV-5: Concurrent requests cannot approve spending against stale unlocked balances;
   process-local state is never the authority for funds or idempotency.
 - INV-6: Malformed input, unknown firms, self-payments and overflow cannot produce partial
@@ -102,6 +121,10 @@ unknown schema. Future schema/fingerprint evolution requires an explicit compati
 - INV-7: An applied schema revision and its schema changes commit atomically. Rejected or
   failed migration attempts cannot falsely advance the revision or damage existing
   financial/idempotency data. Concurrent upgrade callers cannot bypass this invariant.
+
+- INV-8: A processing claim, expiry, owner crash or incomplete cache publication cannot
+  authorize a second execution of an unresolved generation. A business result receipt
+  commits atomically with its effects; stale owners are fenced before safe replacement.
 
 ## Acceptance and verification mapping
 
@@ -140,9 +163,21 @@ lock ordering and idempotency representation enforce these obligations. The prog
 and slice stages must define signatures, exact checks, ownership and finite execution
 allowances before the audited feature approval authorizes execution.
 
+Additional scenario mapping:
+
+| Scenarios | Required obligations |
+| --- | --- |
+| SC-39–41 | FR-15–17; NFR-6; correlation header behavior and replay independence. |
+| SC-42–44 | FR-16; NFR-9–10; INFO/DEBUG/error visibility and isolation/redaction. |
+| SC-45–46 | NFR-11; settings precedence, isolated construction and safe startup validation. |
+| SC-47 | NFR-12; bounded logging degradation preserves financial outcomes. |
+| SC-48–54 | FR-5–8, FR-18–19; INV-4, INV-8; middleware states, A/B crash recovery, TTL and fencing. |
+| SC-55 | FR-10–13, FR-19; INV-7–8; migrate old completed records without immediate expiry/data loss. |
+| SC-56–57 | NFR-3, NFR-11; FR-8, FR-18–19; INV-8; bounded maintenance and sequential A/B resource ownership. |
+
 ## Requirement-driven verification status
 
-SC-1–30 (59 expanded cases) describe the current pre-Alembic application contract.
-SC-31–38 add migration acceptance obligations derived from FR-10–14 and NFR-8.
-The aligned target has38 scenarios/70 expanded cases. These additional obligations are
-planned; neither their specification nor earlier PASS records proves Alembic delivery.
+The current source implements the earlier Alembic contract; earlier PASS evidence remains
+bound to that earlier candidate. This target changes FR-5–8 and INV-4, adds FR-15–19,
+NFR-9–12 and INV-8, updates affected prior scenarios and adds SC-39–57. It contains
+57 scenarios / 97 expanded cases. No new behavior or check is delivered by this draft.

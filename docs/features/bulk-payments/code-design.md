@@ -1,340 +1,271 @@
-# Firm Payments — code design
+# Firm Payments — proposed aligned code design
 
-Implements the accepted [product](requirements.md), [architecture](architecture.md) and
-the proposed [API](api.md). Module boundaries below assign responsibilities; they do not
-freeze private helper bodies or require one abstraction per function.
+Target only; no runtime delivery is claimed. Application SQL remains async psycopg with
+Pydantic schemas and plain records. SQLAlchemy Core is confined to Alembic migrations.
 
-## Modules and dependency direction
+## Modules and direction
 
-| Module | Responsibility and verification boundary |
+| Owner | Responsibility |
 | --- | --- |
-| `app/schemas/` | Pydantic request, response, error and key schemas; all shape/domain validation, sanitization, exact cents and canonical fingerprint v1. No database/pool imports. |
-| `app/models/` | Plain transfer plan/result and durable replay result records. No ORM. |
-| `app/core/` | Immutable settings and structured observability. |
-| `app/db/` | Async pool, transaction boundary, implicit timeout/cancellation lifecycle and schema/revision validation. |
-| `app/services/payments.py` | BulkPaymentService: ordered firm locking, balance-dependent validation, deltas and payment insertion only. No HTTP, idempotency or transaction lifecycle. |
-| `app/services/idempotency.py` | Separate reservation/replay/result persistence service inside the caller-owned transaction. |
-| `app/api/v1/payments.py` | HTTP controller, header cardinality, status/header/error mapping; router mounted at /v1. |
-| `app/api/operations.py`, `app/api/errors.py` | Unversioned health/metrics and safe protocol validation errors. |
-| `app/api/router.py`, `app/main.py` | Route composition, application factory/lifespan and resource wiring. |
-| `alembic.ini`, `migrations/`, `app/db/migrate.py` | Versioned migration resources, advisory-locked Alembic environment and upgrade wrapper; no ORM. |
-| `tests/`, `scripts/` | Full registered checks, executable Gherkin, real PostgreSQL faults and container verification. |
+| app/main.py | Lifespan constructs one settings object, two bounded pools and app-owned telemetry/logger. Validate supported schema/head before serving; close on startup failure. |
+| app/core/config.py | Immutable Settings(BaseSettings), source selection, aliases and budget validation; no import-time loading. |
+| app/core/request_context.py | Scoped ContextVars for immutable correlation/request fields and safe snapshots; no HTTP/storage dependency. |
+| app/core/logging.py | Dedicated structured logger, severity filter, finite event/field schema and safe exception classification; app-owned bounded sink, no root/global handler mutation. |
+| app/core/observability.py | HTTP context/lifecycle middleware, metrics and trace lifecycle using injected settings and dedicated logger. |
+| app/schemas/payments.py, headers.py, errors.py, idempotency.py | All request/response/header validation, canonical fingerprint, stored-result validation and safe serialization. No pool or service imports. |
+| app/api/middleware/idempotency.py | Prepare payment requests once; ask checker using A; return replay/processing/conflict or admit controller; publish completed from durable receipt after B. |
+| app/api/v1/payments.py | HTTP controller orchestrates admitted monetary work and receipt encoding/recording within database-owned B transaction. Maps protocol errors without SQL or transaction lifecycle. |
+| app/services/idempotency.py | Lightweight claim/resolve decision only. Uses storage helpers; does not execute callbacks/payments, interpret payment response bodies, own response capture or recovery loops. |
+| app/services/payments.py | Monetary operations only: indexed resolution, ordered firm locks, funds/overflow checks, balance deltas and ordered inserts. |
+| app/db/idempotency.py | Claim/lookups, guards, receipts and conditional publication SQL; no financial service calls or hidden commit. |
+| app/db/database.py | Pool, supervised transaction/timeout/cancellation boundaries and exact schema/revision oracle. |
+| app/db/idempotency_maintenance.py | Explicit finite reconciliation/cleanup CLI and bounded per-generation work; no monetary execution. |
+| app/models/idempotency.py | Typed decisions, admission token, generation/owner and opaque stored-result envelope. |
+| migrations/versions/0002_request_lifecycle.py | Transactional state/guard/receipt migration and legacy retention cutover; old revision remains unchanged. |
 
-Keep source organization small. No ORM, generic repository hierarchy, Redis, queue or
-distributed-lock abstraction. Source edits must stay within the formally approved slice
-ownership; shared manifests, checks, fixtures and environment adapters need explicit owners.
+Do not introduce a generic workflow/repository framework. Services never import each other
+or middleware. The controller calls payment logic and receipt storage independently; middleware
+calls the checker/completion boundary. They communicate through typed admission/result records.
 
-## Types, lifetimes and transaction ownership
+## Interfaces
 
-- One immutable Settings instance and one pool per service process. Lifespan opens/waits
-  within a startup deadline and always closes the pool, including startup failure paths.
-- Each asynchronous route borrows one connection for one operation. A transaction context
-  encloses every database effect and completes before a result can leave the database operation.
-- Never share a borrowed connection between requests. No global mutable request state,
-  cached balances or local mutex grants monetary authority.
-- Request input remains logically immutable through fingerprint and execution. Aggregate
-  repeated payees in a local integer-delta map; retain every original payment entry for
-  insertion. Validate all resulting balances before mutations.
-- Explicitly lock all known participating firms in ascending internal ID before checking
-  money or updating rows. Stable IDs/UUIDs and cooperating external balance writers are
-  assumptions of this protocol. All monetary SQL is parameterized.
-- Reservation conflict is resolved in a later READ COMMITTED statement. An existing row
-  must have a matching fingerprint and completed status/body before replay. An incomplete
-  committed row raises a dedicated invariant-breach error; never delete/re-execute it.
-- Store the completed response before commit. A disconnect during commit is ambiguous;
-  HTTP maps the infrastructure failure to 503 without claiming rollback certainty.
-- Obtain each inserted payment's generated ID with SQL RETURNING and retain its association
-  with the corresponding request entry. Do not infer IDs from sequence arithmetic or assume
-  unordered bulk RETURNING rows match request order. Build typed PaymentCreated objects
-  using those persisted IDs, canonical public firm UUIDs, cents and exact descriptions.
-  Store the full ordered BulkPaymentResponse in the idempotency JSON before commit;
-  parse replay into the appropriate success/error response type without generating new IDs.
+```python
+@dataclass(frozen=True)
+class Admission:
+    payer_uuid: str
+    key: str
+    fingerprint: str
+    generation: UUID
+    owner: UUID
 
-## Settings and deployment budget validation
+@dataclass(frozen=True)
+class StoredResponse:
+    status_code: Literal[201, 422]
+    body: dict[str, Any]
 
-Environment names are prefixed `PAYMENTS_`, except the secret connection string
-`DATABASE_URL`. Never log that string. `PAYMENTS_PROFILE` is `local` or `configured`;
-default is `configured`, which requires explicit values. Compose explicitly selects local.
+# NewAdmission, Completed(envelope), Processing and Conflict are distinct typed decisions.
+async def check(connection, identity, fingerprint) -> Decision: ...
+async def acquire_execution_guard(connection, admission: Admission) -> None: ...
+async def store_receipt(connection, admission: Admission, response: StoredResponse) -> None: ...
+async def publish_completed(connection, admission: Admission) -> StoredResponse: ...
 
-| Setting | Meaning |
-| --- | --- |
-| `DB_CONNECTION_BUDGET` | Service-wide database allocation C, after other-client/admin reserves. |
-| `MAX_PROCESSES` | Maximum simultaneous service processes P, including rolling-deploy surge. |
-| `POOL_MIN`, `POOL_MAX`, `POOL_MAX_WAITING` | Per-process connected minimum/maximum and finite positive waiting capacity. |
-| `ACQUIRE_TIMEOUT_MS` | Maximum pool acquisition wait. |
-| `CONNECT_TIMEOUT_SECONDS` | Finite libpq connection establishment timeout. |
-| `STATEMENT_TIMEOUT_MS`, `LOCK_TIMEOUT_MS` | PostgreSQL per-statement and per-lock bounds. |
-| `IDLE_TRANSACTION_TIMEOUT_MS`, `TRANSACTION_TIMEOUT_MS` | Idle transaction/session and whole transaction bounds. |
-| `OPERATION_BUDGET_MS`, `RESPONSE_MARGIN_MS` | Post-validation operation planning budget D and response/processing allowance. |
-| `STARTUP_TIMEOUT_MS` | Maximum wait for initial pool readiness. |
+class BulkPaymentService:
+    @staticmethod
+    async def transfer(connection, request: BulkPayment) -> TransferResult: ...
 
-Every listed numeric setting must be positive, except `POOL_MIN` may be zero. Reject
-non-integers, `POOL_MIN > POOL_MAX`, `P * POOL_MAX > C`, lock timeout >= statement timeout,
-or statement/idle timeouts >= transaction timeout. Require:
-
-```text
-ACQUIRE_TIMEOUT_MS + STATEMENT_TIMEOUT_MS + TRANSACTION_TIMEOUT_MS
-    + RESPONSE_MARGIN_MS <= OPERATION_BUDGET_MS
+# Controller-owned callback passed to the database B transaction boundary:
+async def execute_admitted(connection, request: BulkPayment, admission: Admission):
+    await acquire_execution_guard(connection, admission)
+    result = await BulkPaymentService.transfer(connection, request)
+    response = encode_and_validate_result(result, request)
+    await store_receipt(connection, admission, response)
+    return response
 ```
 
-The statement term reserves a bounded checkout-health query; transaction time includes
-all transfer SQL. In the HTTP operation acquire once, check once, then transact; do not
-allow repeated health-check attempts to consume an unbounded multiplier. Failed checkout
-health checks discard the connection and fail this request with 503; a later request may
-try again. Connection establishment occurs in bounded pool background workers, while
-the waiting request remains subject to its acquisition limit.
+Signatures above show responsibility, not final driver annotation syntax. Public middleware
+does not accept a user-supplied Admission object; the validated server claim populates request
+state. The checker returns an opaque cached envelope; schema codec validates status/body and
+request consistency before replay. Corruption or missing expected receipt fails closed.
 
-Propose the following **local development profile**, not a production capacity claim:
+## Persistent representation
 
-| Parameter | Local value | Reason |
-| --- | --- | --- |
-| C / P | 8 connections / 2 processes | A deliberately small service allocation supporting a two-process local concurrency exercise. Other database capacity is unallocated. |
-| Pool min / max / waiters | 1 / 4 / 4 | 2 × 4 fits C; permit at most one additional queued request per connection slot before overload rejection. |
-| Acquisition / connect | 1000 ms / 2 seconds | Short local queueing; disconnected pool workers cannot hold callers indefinitely. |
-| Statement / lock | 3000 / 2000 ms | A contended lock fails before the statement limit; these are generous local SQL budgets, not measured latency targets. |
-| Idle transaction / whole transaction | 5000 / 10000 ms | Reclaim stalled transactions and bound a multi-statement batch beyond individual statement limits. |
-| D / response margin | 15000 / 1000 ms | 1000 + 3000 + 10000 + 1000 fits the declared post-validation planning budget. |
-| Startup readiness | 10000 ms | Bound local database/pool startup independently from request handling. |
+Keep firms/payments columns, INTEGER cents and actual identity RETURNING behavior unchanged.
+Keep payer/key namespace and fingerprint v1. Extend bulk_payment_requests with:
 
-These values are a transparent developer profile chosen to exercise bounded behavior,
-not values validated by existing candidate tests. A production deployment must select
-`configured`, supply its real C/P/D and validate workload suitability. The algebra is
-necessary budget consistency, not proof of an end-to-end latency SLA.
+- state TEXT constrained to processing/completed; generation UUID UNIQUE; owner_token UUID.
+- created_at, owner_deadline, completed_at nullable, expires_at TIMESTAMPTZ.
+- existing fingerprint, nullable status_code/response_body with state consistency CHECK:
+  processing has no cached result/completion timestamp; completed has 201/422, nonnull
+  JSONB body and completion timestamp. Fingerprint is the existing 64-character digest.
+- existing payer/key primary key and C-collated exact keys; UNIQUE(payer,key,generation)
+  supports the guard foreign key. Add an expires_at index and a partial processing
+  owner_deadline index for bounded maintenance selection.
 
-## Deadlines, cancellation and cleanup
+request_execution_guards: generation UUID primary key; payer/key/generation foreign key
+to the request row with ON DELETE CASCADE. The row is inserted atomically with each new
+request claim. It is the common row lock for B, publication, recovery and deletion.
 
-Configure PostgreSQL session `statement_timeout`, `lock_timeout`,
-`idle_in_transaction_session_timeout` and `transaction_timeout` on each new connection.
-PostgreSQL 17's transaction timeout terminates a session whose transaction lasts too
-long; a lost connection is discarded/replaced rather than returned as healthy
-([PostgreSQL timeout documentation](https://www.postgresql.org/docs/17/runtime-config-client.html)).
-Install the whole-transaction timeout before starting payment transactions, so it covers
-reservation waiting, SQL work and commit. Do not use prepared/two-phase transactions.
+request_result_receipts: generation UUID primary key referencing its guard ON DELETE
+CASCADE; owner_token, fingerprint, status_code 201/422, response_body JSONB, committed_at
+TIMESTAMPTZ default database current time. Receipt is immutable after insertion. JSON body
+is validated by schemas before write and on read; constraints do not pretend to validate
+the complete payment response structure. No correlation headers are persisted here.
 
-Use asynchronous FastAPI payment/readiness handlers and one app-owned AsyncConnectionPool on the lifespan event loop. Await every financial SQL/cursor/pool operation. Keep migration CLI and independent fixture/inspection SQL synchronous; they do not run in the request transaction.
+## Claim A, execute B, publish A
 
-Compute one absolute deadline from loop.time() and the existing operation budget. Stop financial work before the existing response margin, which reserves bounded connection/task cleanup and response construction. Use asyncio.timeout_at around the complete operation; never grant a new full timeout to each query. Server statement, row-lock, idle and transaction timeouts remain independent defenses.
+All database transactions are READ COMMITTED and bounded. First A INSERTs a processing
+request ON CONFLICT DO NOTHING RETURNING; when inserted it also INSERTs its guard in the
+same transaction. Unique conflict can wait for another short A claim, never for its B
+financial transaction. A later statement reads the committed winner. Busy lifecycle locks
+are classified as processing or infrastructure failure according to whether the entry can
+be safely identified; do not hide database unavailability as a successful lookup.
 
-A request owns one supervised financial child task awaited through asyncio.shield inside
-the timeout boundary. Operation records track connection ownership and commit state. While
-BORROWED, close/discard the owned session before cancellation, then join the child within
-cleanup reserve. Successful checkout registers ownership without another await.
+A new claim uses database time for created_at, expires_at=created_at+24h and
+owner_deadline=created_at+the declared operation budget. Entry read order is: establish
+safe expiry handling; for an unexpired entry compare fingerprint; completed returns opaque
+cached envelope, processing returns Processing. Never hold A while invoking the controller.
 
-The return adapter transitions BORROWED -> POOL_OWNED synchronously by accepting the return
-into pool maintenance; clear request ownership at that point. Never infer handoff from an
-attempted return that can still suspend. Once POOL_OWNED, request cleanup cannot close the
-session, which may already be reassigned. Maintenance handles disposal/replacement and pool
-capacity; it performs no financial work. Retain the narrow, locked psycopg-pool adapter and
-real pre/post-handoff cancellation/timeout regressions. Financial tasks and request cleanup
-are joined; ordinary pool maintenance remains owned by the pool's bounded lifecycle.
+B's first lock is SELECT guard FOR UPDATE, followed by a fresh read of its request row.
+Verify generation, owner, fingerprint, state=processing and owner_deadline not yet passed
+at admission. A missing guard, replaced/fenced owner or stale admission aborts before firm
+locks/writes. A B transaction that already owns the guard is not revoked by a clock tick;
+its existing absolute operation and server transaction limits still apply.
 
+Then lock all involved firms ORDER BY internal id FOR NO KEY UPDATE, check the complete
+sum and aggregated recipient overflows, apply deltas, insert every original entry and use
+RETURNING id per entry. Business rejection creates no financial effects but does create
+its result receipt. Financial result and receipt commit together. Do not mutate cached
+request state inside B; processing must remain visible to concurrent plain SELECTs on A.
 
-If COMMIT has started without an acknowledged outcome, report an uncertain commit (503 for a connected caller), preserve safe outcome telemetry and require identical-key recovery. An acknowledged commit or replay never becomes a second monetary execution because a response was lost. External cancellation propagates after cleanup; it does not fabricate a response to a disconnected caller. No unbounded retries, wait loops, detached operation tasks or concurrent commands on one connection. Verify pool waiters, cancellation/cleanup, stalled transport and event-loop responsiveness against the configured bounds, without claiming a strict caller-visible SLA.
+Publication on A locks the guard, verifies owner/generation, reads the receipt and uses a
+conditional UPDATE to completed, copying validated status/body. Set completion/expiry
+once with database publication time +24h; an already completed identical generation returns
+unchanged timestamps/result. No completion without a committed receipt. Release A before
+sending the normal 201/422 response. Response capture must not cache arbitrary streaming
+or transient HTTP responses; this middleware supports only the finite bulk-payment result.
 
-## Schema and migration details
+## Failure, recovery and safe reuse
 
-- `firms`: identity INTEGER primary key, nonnull name/UUID/balance; canonical UUID text,
-  unique UUID B-tree index; nonnegative balance check; INTEGER provides the upper bound.
-- `payments`: identity INTEGER primary key, nonnull payer/payee foreign keys and description,
-  positive amount check and payer != payee check. Do not require gapless identity values.
-- `bulk_payment_requests`: payer/key composite primary key, 64-character SHA256 digest,
-  nullable status/body during reservation with consistent nullability; completed status
-  is 201 or 422. Created timestamp is for diagnostics, not expiration authority.
-- Alembic owns ordered revisions and its version table; remove standalone schema.sql.
-  The initial revision owns the same DDL, indexes, constraints and sequence semantics.
-- migrations/env.py creates a migration-only SQLAlchemy Core connection from runtime
-  configuration (NullPool), with finite connect/lock/statement bounds. Acquire the advisory
-  transaction lock before invoking Alembic version inspection/creation, inside one outer
-  transaction. Configure Alembic with that connection and target_metadata=None; there is no
-  ORM metadata or automatic production autogenerate/stamp path.
-- app/db/migrate.py delegates to Alembic upgrade head; direct CLI and wrapper share the same
-  environment/transaction policy. Do not maintain a second CREATE IF NOT EXISTS bootstrap.
-- Before an unversioned legacy adoption, verify every supported table/column/type/nullability,
-  identity/PK/FK/check/index and key collation. Empty application state may be initialized;
-  partial or incompatible schemas fail without stamping. Preserve all existing rows and
-  identity sequence state. Reuse a focused schema verifier rather than duplicate a weaker
-  migration-only check. Adapt synchronous migration and async startup boundaries explicitly.
-- Startup validates exact supported revision as well as structure. Resolve the packaged
-  single head from revision resources; missing/older/unknown revision fails initialization.
-  Revision checks are read-only and do not make each health probe execute migration code.
-- Reject the initial destructive downgrade before executing DDL/version updates. Atomic
-  migration failure rolls back changes and head recording; safe retry is explicit.
-- Explicitly seeded IDs in SC-21 must not be treated as proof that the identity sequence
-  has advanced. Test fixtures own fresh state and sequence setup; production import
-  sequence maintenance is separate from the bulk-payment API.
+Processing 409 is a finite outcome, not automatic payment retry. Infrastructure failure
+returns safe 503 Retry-After:1; if commit started, preserve unknown_commit. Never infer
+absence of effects from a broken connection or expired timeout.
 
-## Verification design and coverage boundaries
+When B has definitively rolled back and its supervised task is joined, a bounded cleanup
+may lock the guard, verify the same owner and absence of receipt, fence/delete that abandoned
+claim and release the key. If cleanup cannot establish those facts within the deadline,
+leave processing for maintenance. Do not spend an additional unbounded budget after a response.
 
-Pure checks cover exact money grammar/range, canonical fingerprint equivalence versus
-conflict, settings validation and budget algebra. SQL/API checks use PostgreSQL 17 through
-Testcontainers; they must assert durable rows and balances, not status alone.
+Maintenance uses SELECT candidates ordered by timestamp/generation with finite batch/total
+limits, then per-entry guard FOR UPDATE NOWAIT. Skip busy guards; no spin. A fresh request
+read verifies generation. If a receipt exists, publish its exact result once. If no receipt
+exists and owner_deadline passed, delete the abandoned request under the guard lock; cascade
+deletes its guard. No second executor can acquire that missing generation; a new claim
+gets a different generation/owner. This deletion is safe release of a failed attempt before
+TTL, not expiry of a completed financial result. Invalid receipt fails closed and is alerted.
 
-Gherkin bindings must implement SC-1–38, including every outline row and the exact SC-21
-SQL/JSON/three-payment result. Reusing old tests does not replace binding missing scenarios.
-The test harness must explicitly override Background balances where a scenario supplies
-its own seed; fixtures may not accidentally append duplicate firms.
-For every success, compare the returned ordered payment objects and IDs with persisted
-rows and request entries. Include repeated recipients, sequence gaps, same-key replay and
-concurrent requests so an assumed contiguous-ID range cannot satisfy the oracle.
+If a delayed old B was waiting for the deleted guard, it must observe zero rows or a failed
+generation check and abort. It must never recreate a missing guard. Publication/recovery
+also checks generation to prevent late A updates from overwriting a new request.
+Maintenance never executes payment logic. Retry requests may invoke one bounded receipt-
+publication attempt if they can obtain the guard; otherwise return processing 409. No
+recovery path may take ownership of an active locked B generation.
 
-Concurrency verification uses a held database lock and observed server wait state to
-establish overlap. Derive participant count from the hypothesis: at least competing
-requests across separate process-local pools, enough distinct-key spending attempts to
-exceed funds, repeated identical keys to detect duplicate execution, and opposing transfer
-paths that could form a lock cycle. Counts are documented fixtures, not product capacities.
+For completed expiry: lock guard NOWAIT, reread and require completed with expires_at <=
+database current time. Delete the old request and cascade receipt/guard in the same short
+A transaction, then claim a new generation or let a later request claim. Compare-and-set
+generation protects races. A completed receipt can be deleted only here, after the old
+generation is fenced from execution; it cannot be removed by an unrelated age-only DELETE.
+For expired processing, reconcile receipt/ownership first; a busy or unresolved generation
+returns processing even past 24h. Key reuse after safely completed TTL can pay again.
 
-Choose index-test population/selectivity to model the stated thousands-of-firms domain;
-document the chosen sample and inspect index/EXPLAIN evidence without forcing planner
-settings to make a nonrepresentative plan pass. No benchmark throughput claim is inferred.
+Lock order is guard → request lifecycle update → firms in ascending id for B; B reads request
+without a row lock and does not write it. Recovery/publication/expiry lock guard before
+request UPDATE/DELETE and never acquire firm locks. Initial claim has no existing guard to
+lock and never touches firms. No helper acquires these locks in reverse order. Startup and
+maintenance do not run concurrently inside an application financial transaction.
 
-Failure checks cover insertion failure after balance mutation, key-conflict races, rollback
-followed by same-key retry, lock/statement/whole-transaction deadlines, pool overload,
-incomplete durable records, lost HTTP responses and expired operation budget. Verify that
-server-side deadline termination leaves no partial monetary changes and the pool recovers.
+CLI: `python -m app.db.idempotency_maintenance --batch-size N --max-batches M
+--timeout-seconds T`, all finite positive values required; exit nonzero on command failure,
+emit safe aggregate counts of completed/released/deleted/skipped/unresolved. Invalid entries
+are retained with an operational failure signal. Deployment scheduling and connection
+allocation must include this process; local Compose need not add a permanent worker.
 
-Container verification builds the service, executes Alembic upgrade head, verifies non-root Python
-3.15 startup, submits SC-21 over real HTTP, checks persisted results and same-key replay,
-and cleans up only its own containers/network. Isolated check adapters create their own
-virtual environments/dependencies and Docker prerequisites under approved harness boundaries;
-project-local trusted-host verification is explicitly authorized by
-PROJECT_OVERRIDES.md; it is not a claim of shared native isolation. Preserve candidate,
-environment, log and resource-artifact bindings and fail when prerequisites are unavailable.
+## Schema lifecycle and migration
 
-## Structured logging and correlation
+0002 transforms only a fully validated supported 0001 schema. Existing completed records
+become completed, each with a generated generation/owner, guard and corresponding immutable
+receipt preserving original status/body/fingerprint. Use one transactional cutover timestamp
+for completed_at, owner_deadline and a full 24h expires_at for all migrated rows; retain
+original created_at separately. Pre-existing incomplete committed rows cause a safe failure,
+not a fabricated completion. Python UUID generation inside migration avoids an extension.
 
-Use standard-library logging with a JSON formatter and an app-scoped Telemetry interface.
-Propose `prometheus-client` for metrics and OpenTelemetry API/SDK plus OTLP HTTP exporter
-for tracing; lock versions through the formal slice's manifest ownership. No collector
-is required to run the local payment service. Automatic request-body/SQL instrumentation
-is excluded; create explicit safe spans rather than exporting statements/parameters.
+Validate existing result envelopes before adopting them. Preserve all firms/payments,
+balances, sequences and stored JSON semantics. Record 0002 only with the full successful
+transaction; retain advisory migration serialization and finite connection/SQL bounds.
+Startup requires exact supported structure and packaged 0002 head. Empty install applies
+0001 then 0002; legacy unversioned adoption still verifies 0001 before advancing. Reject
+destructive 0002 downgrade before mutation. Stop/drain old writers before upgrade.
 
-Generate a new request UUID at ingress, before validation, and propagate it explicitly
-through async request/operation tasks and safe logging context. Clear/reset context after every
-attempt to prevent cross-request leakage. Extract valid W3C trace context using the SDK,
-without arbitrary baggage; logs include trace/span IDs when present. Replays have new
-attempt IDs and preserve original returned payment IDs.
+## Settings
 
-Emit one `http.request.completed` summary per payment attempt when logging is healthy.
-The allowlisted event schema is:
+Use pydantic_settings.BaseSettings and SettingsConfigDict; lock a Python-3.15-compatible
+pydantic-settings version without unrelated dependency upgrades. Base settings are frozen.
+Preserve Settings.from_env(mapping=None), Settings.local(url, **overrides) and the local
+URL/create_app compatibility entry points. Explicit mapping uses a source set containing
+only that mapping and permitted defaults; model_validate alone must not accidentally trigger
+ambient BaseSettings construction. Explicit local construction is similarly isolated.
 
-```text
-timestamp (UTC RFC3339), level, event, service, version,
-request_id, trace_id?, span_id?, route (template), method,
-status_code?, duration_ms, outcome, error_code?, error_type?, sqlstate?
-```
+Use validation_alias for DATABASE_URL and existing PAYMENTS_* names. Production load order
+is explicit constructor > environment > project-root literal dotenv > allowed defaults.
+Custom dotenv source retains dotenv_values(interpolate=False) and does not mutate os.environ.
+Do not enable CLI/secrets-directory sources implicitly. Missing dotenv is valid. Ignore
+unrelated environment/dotenv variables without accepting unknown explicit application fields.
+Set safe validation diagnostics to exclude raw inputs; never stringify full ValidationError,
+dump settings or emit connection URLs. Migration-only URL loading must not require unrelated
+HTTP budget fields, while still using the same source/secret rules.
 
-Use finite outcome/error-code vocabularies: committed, replayed, business_rejected,
-validation_rejected, conflict, transient_failure, unknown_commit, invariant_breach,
-client_disconnected. Unknown routes use one `unmatched` template, not the raw URL.
-Service/version come from deployment metadata, not request input. Missing status after a
-disconnect remains null; never invent a delivered response. Use INFO for normal outcomes,
-WARNING for transient/uncertain failures, ERROR for invariant breaches. Startup/shutdown,
-readiness state transitions and telemetry degradation have separate bounded events.
+Default deployment profile is configured; every existing explicit database budget remains
+required there. local supplies existing illustrative defaults. Integer fields reject bool,
+fractional forms and invalid nonintegers while parsing legitimate environment integer strings.
+Preserve pool_min<=pool_max, P*pool_max<=C, lock<statement<transaction, idle<transaction and
+the existing budget validation. Multi-phase A/B execution additionally uses one absolute
+asyncio timeout across phases, never a fresh budget per checkout or transaction.
 
-Never emit request/response bodies, descriptions, amounts/balances, firm/payment IDs,
-idempotency keys or payload fingerprints, authorization/cookie headers, query strings,
-database URLs, SQL text/parameters, raw validation input or raw driver exception messages.
-Allow exception class and a validated SQLSTATE only. Do not automatically record raw
-exception events/tracebacks containing source/locals/driver text. Apply the same policy
-to framework/server access/error logging; JSON-encode user-controlled values rather than
-allowing log-line injection. Debug level does not bypass redaction.
+PAYMENTS_IDEMPOTENCY_POOL_MAX selects A's share of the combined POOL_MAX, default1.
+Require 1 <= IDEMPOTENCY_POOL_MAX < POOL_MAX; B gets the remainder. This is an architecture
+choice to keep short lifecycle lookups available while B is busy, not a capacity claim.
+Split POOL_MIN deterministically: A min=min(POOL_MIN,A max), B min=remaining POOL_MIN.
+Both pools share a bounded acquisition-admission counter/queue capped by POOL_MAX_WAITING;
+do not double the allowed waiters. Existing pool connection/queue gauges report combined
+pressure with at most a finite lifecycle/business role label. Each pool uses the existing
+safe borrow/return lifecycle. Maintenance allocation remains part of the deployment budget.
+Distinct pools guarantee A and B cannot accidentally reuse the same backend session.
 
-## Metrics, traces and operational semantics
+Existing numeric defaults remain local illustrations: C=8, P=2, pool_min=1, pool_max=4,
+max_waiting=4, acquire=1000ms, connect=2s, statement=3000ms, lock=2000ms, idle=5000ms,
+transaction=10000ms, operation=15000ms, response margin=1000ms, startup=10000ms.
+Preserve PostgreSQL statement/lock/idle/transaction connection settings and owned task handoff.
 
-| Metric | Type and allowed labels | Meaning |
-| --- | --- | --- |
-| `firm_payments_http_requests_total` | Counter: route template, method, status class | Payment HTTP attempts, including validation/errors; probes/scrapes excluded. |
-| `firm_payments_http_request_duration_seconds` | Histogram: route template, status class | Server attempt duration using monotonic time, not network delivery latency. |
-| `firm_payments_attempts_total` | Counter: outcome | Distinguish a new committed result from replay/rejection/conflict/failure. |
-| `firm_payments_created_total` | Counter: no request labels | Number of payments newly committed with acknowledged commit; never increment on replay. |
-| `firm_payments_pool_acquire_duration_seconds` | Histogram: bounded result enum | Pool acquisition delay and failures. |
-| `firm_payments_db_transaction_duration_seconds` | Histogram: bounded result enum | Transaction duration, including rollback or unknown-commit classification. |
-| `firm_payments_db_failures_total` | Counter: finite category enum | Pool exhaustion, lock/statement/transaction timeout, connection failure or invariant breach. |
-| `firm_payments_pool_connections`, `firm_payments_pool_waiters` | Gauges: fixed state enum only where needed | Process-local pool pressure; reads pool state without a financial SQL query. |
-| `firm_payments_telemetry_dropped_total` | Counter: bounded signal enum | Locally observed recording/export queue drops, when instrumentation can still report them. |
+Move all telemetry configuration out of os.environ reads in Telemetry. Retain existing
+positive bounded queues/timeouts and sample ratio [0,1]. Existing aliases: PAYMENTS_
+TELEMETRY_SHUTDOWN_MS, HEALTH_PROBE_BUDGET_MS, OTLP_TIMEOUT_MS, LOG_QUEUE_CAPACITY,
+TRACE_SAMPLE_RATIO, OTLP_ENDPOINT, TRACE_QUEUE_CAPACITY. New PAYMENTS_LOG_LEVEL defaults
+INFO and normalizes DEBUG/INFO/WARNING/ERROR/CRITICAL case-insensitively. TTL is fixed 24h
+for this contract, not a new environment override. No unrequested logger framework.
 
-Never label metrics by request/trace ID, firm/payment UUID/ID, key, fingerprint, description,
-raw path or exception message. Use seconds for duration metrics and fixed bucket boundaries
-chosen from the declared operation/deadline profile; document them as instrumentation
-parameters, not latency requirements. Metric definitions follow
-[Prometheus cardinality/naming guidance](https://prometheus.io/docs/practices/naming/).
+## Structured event contract
 
-Trace the HTTP attempt and bounded child phases `pool.acquire`, `payment.transaction`,
-`idempotency.resolve`, `firms.lock`, `payments.persist`, `transaction.commit`. Attach only
-allowlisted route/status/outcome/error categories. A replay has no persist/commit-effect
-span claiming a new transfer. Mark ambiguous commit explicitly; do not label it rolled back
-solely because the acknowledgement failed. Do not export raw SQL or financial attributes.
+Dedicated firm_payments logger emits JSON with UTC timestamp, severity, event, service,
+version and request snapshot: correlation_id, request_id, trace_id/span_id when present,
+normalized route and finite method. Completion adds status_code (null if not delivered),
+duration and finite outcome; errors add safe category/class/validated SQLSTATE only.
 
-Use an app-owned tracer provider/exporter lifecycle and separate Prometheus registry to
-avoid duplicate registration or shared test state. OTLP export is opt-in with bounded
-batch queue, export timeout and shutdown flush; record/export after financial locks are
-released. Sampling ratio, queue capacities and timeouts are explicit configuration, not
-deployment SLOs. Local profile: JSON logs + metrics, in-process trace context, no external
-export. Tests use an in-memory exporter with deterministic sampling. Reference:
-[OpenTelemetry Python export](https://opentelemetry.io/docs/languages/python/exporters/).
+INFO arrival/completion applies to every HTTP request. Payment metrics still exclude probes.
+WARNING/ERROR errors are emitted once where classified; ordinary business/validation 422
+is INFO. Preserve late cleanup failures as separate distinct events. DEBUG stage start/end/
+failure events cover request preparation, claim/lookup, admission, guard, firms lookup/lock,
+plan, balance update, each insert ordinal, receipt, commit, publication and cleanup/recovery.
+Per-payment events are bounded by the 1000-entry batch. All events apply severity filtering
+before formatting and use finite event/field names. Health operations use their own phases.
 
-Logs use a bounded nonblocking queue to stdout; full/broken sinks may lose events and
-increment the drop signal, with a rate-limited sanitized degradation event where possible.
-No telemetry call retries indefinitely, propagates a sink exception into a transaction,
-or changes a committed/replayed response. No guarantee of operational-event delivery
-across process crashes is made. Counters may miss a commit if the process dies immediately
-after it; only database records are financial truth. A ledger/outbox audit stream would be
-a separate product decision, not an implied property of JSON logs.
+No bodies/descriptions/amounts/balances/firm or payment IDs/keys/fingerprints/auth headers/
+query strings/SQL parameters/URLs/raw validation inputs/raw driver text at any level.
+Correlation has bounded safe grammar but is untrusted; never use it as identity or metric
+label. Capture context on the producing task, not in the logging worker. The bounded queue
+and exporter fail independently, report drops without recursive logging and have finite
+shutdown. No traceback capture with sensitive locals or library handler bypass.
 
-Operational routes use the API contract. Bound readiness to a configured health-probe
-budget and pool/query deadlines; it must not inherit a long payment queue indefinitely.
-Liveness and metrics require no database access. Suppress normal per-probe completion
-logs; emit readiness state changes instead. Readiness includes initialization/schema
-compatibility and database/pool availability, not guaranteed acceptance of every batch.
+## Verification
 
-Add an operations guide with metric/scrape examples, log correlation, signals for 503 and
-unknown-commit spikes, readiness failure, saturation and telemetry drops, plus a same-key
-retry/reconciliation runbook. Propose alerts but leave windows/thresholds to deployment
-workload/SLO decisions. No invented paging targets or hosted monitoring deployment.
+Keep real PostgreSQL Testcontainers, Linux HTTP verification and generated-ID gap oracle.
+Bind SC-1–54, all outline rows and changed processing semantics. Observe real concurrent
+coordination through independent pools; hold B after A claim to assert fast processing 409.
+Inject failures before/after A claim, B receipt/commit and A publication; resume stale owners
+after recovery/deletion; race TTL cleanup with B/duplicates. No missing Docker skip or fake PASS.
+Check old 0001 completed replay preservation and transactional 0002 failure/retry.
 
-Verification must capture JSON logs, metric deltas and in-memory spans for new commit,
-replay, rejection, conflict, validation error and SQL failure. Assert correlation survives
-concurrent async handlers without leakage; inject canary secrets/payload text and verify
-absence across every telemetry signal. Check replay never counts new payment effects,
-each app registry is isolated, probes are non-mutating, liveness survives database outage,
-readiness fails within its budget, and full queues/exporter failure leave transfers and
-same-key retry behavior correct. Do not use metric counters to assert a durable ledger.
-
-Exact argv, ownership and requirement/scenario coverage belong in the current slice/check
-definitions. The project-local trusted-host exception governs Docker execution. Missing
-Docker/network prerequisites fail their checks rather than silently reducing coverage.
-
-## Description sanitization amendment
-
-Use a Payment description field validator in before mode. For string input, remove U+0000 and isolated U+D800–U+DFFF code points before length validation; pass non-string input through unchanged so StrictStr still rejects incorrect types. Preserve every other character exactly, including whitespace and supplementary characters decoded from valid JSON surrogate pairs. Use the sanitized model for existing v1 fingerprints, PostgreSQL TEXT, durable JSONB responses and replay. Do not sanitize amounts, UUIDs, keys or descriptions already persisted. SC-27 verifies successful sanitized transfers and same-key equivalence; SC-28 verifies supported text preservation. No storage migration is required.
-
-## Async verification ownership
-
-Keep every app/pool on one persistent test event loop for its complete lifespan and requests. Adapt synchronous pytest-bdd/inspection fixtures through a TestClient/portal owning that loop; do not open an async pool on one loop and issue requests from fresh asyncio.run loops. Retain independent pools/instances, real PostgreSQL lock contention, generated-ID gaps and deliberate mutation oracle, null sanitization/replay, redaction, trace queue pressure, health bounds, real TCP reply withholding at checkout/SQL/COMMIT/ROLLBACK, and final container HTTP checks. SC-29 verifies a waiting database operation does not block a concurrent liveness request.
-
-## Dotenv configuration
-
-app/core/config.py reads the repository-root .env with python-dotenv, then overlays
-process environment values. Explicit configuration mappings bypass ambient loading.
-Loading is deferred to startup/bootstrap, does not mutate os.environ, and uses literal
-values without variable interpolation. Missing .env is valid with supplied environment.
-Existing profile/limit validation remains mandatory. Track .env.example with local-only
-values; keep actual .env files out of Git and images and preserve existing local files.
-Declare the already-locked python-dotenv1.2.4 as a production dependency; no upgrades.
-
-## Migration verification derived from requirements
-
-SC-31–38 cover empty creation, verified legacy preservation/replay, incompatible/partial
-schema rejection, idempotent repeated upgrades, actual concurrent upgrade contention,
-transactional failure/retry, destructive downgrade denial and unsupported-revision startup.
-Use real PostgreSQL and observe actual overlapping migration execution. Compare all prior
-financial/request rows and sequence state, not only row counts or process exit codes.
-Inject migration failure inside a transaction after DDL, and assert neither DDL nor revision
-survives; retry must then converge safely. CLI errors and logs must exclude synthetic secrets.
-Run all prior financial/async/sanitization/versioned HTTP cases against the migrated schema.
-
-The target is38 scenarios/70 expanded cases; specification is not delivery. Exact task and
-check mappings are in feature.json and slices.md. Historical requests/deliveries stay in
-private audit state; current documents describe one coherent target rather than appended
-conflicting generations. Granular local source commits follow docs/harness/COMMIT_POLICY.md;
-Git commits do not waive checks, independent review or final acceptance.
+Verify settings precedence/isolated construction/invalid startup, header matrix on all
+response statuses, correlation across async cleanup, INFO/DEBUG filtering and redaction at
+all levels, queue failures, metric outcomes and readiness isolation. Preserve pool handoff,
+real transport cancellation/commit uncertainty and exact money/sample invariants. Fresh full
+candidate checks, independent complete-source review and separate audited acceptance remain.

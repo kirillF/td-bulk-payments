@@ -1,6 +1,6 @@
 # Firm Payments — API contract
 
-Implements [FR-1–14 and NFR-1–8](requirements.md) and [SC-1–38](scenarios.feature) under the accepted
+Implements [FR-1–19 and NFR-1–12](requirements.md) and [SC-1–57](scenarios.feature) under the accepted
 [architecture](architecture.md). This is the proposed program contract, not a claim of
 implementation completion.
 
@@ -46,6 +46,7 @@ entries and the `6250`, `5800.5`, `1200.75` amount spellings.
 | 422 | `{"detail": "insufficient_funds"}` | Durable business rejection; no monetary changes. |
 | 422 | `{"detail": "balance_limit_exceeded"}` | Durable business rejection; no monetary changes. |
 | 409 | `{"detail": "idempotency_key_conflict"}` | Original result remains unchanged; no additional effects. |
+| 409 | `{"detail": "request_processing"}` | Matching request entry is processing; no controller/business execution. Retry the same key later. |
 | 503 | `{"detail": "service_unavailable"}` and `Retry-After: 1`. | Retryable infrastructure failure; commit may be uncertain, so retry the same key. |
 
 Validation error wording is framework-generated and not a stable machine error code.
@@ -82,139 +83,95 @@ OpenAPI documents the payment objects, success fields and both validation/busine
 shapes, including 409 and 503. No batch ID, status polling, authentication or history
 endpoint is added. Error responses do not contain partially created payment objects.
 
-## Correlation and operational endpoints
+## Correlation and visibility
 
-Each request receives a server-generated UUID request ID. Return it in `X-Request-ID`
-on successful and error responses, including validation failures, and use the same value
-in that attempt's logs. Do not trust or reflect an arbitrary incoming request ID. A retry
-gets a new request ID while retaining its original payment result/IDs.
+Optional X-Correlation-ID: exactly one case-insensitive header name, case-sensitive opaque
+value with 1–128 ASCII letters/digits/dot/underscore/hyphen. Preserve a valid value; replace
+absent, empty, malformed, oversized, duplicate or comma-combined values with a UUID hex ID.
+Replacement never causes payment rejection and never logs rejected raw metadata. Echo
+exactly one effective X-Correlation-ID and a fresh server-generated X-Request-ID on every
+application-generated HTTP response, including cached, validation, conflict, 404 and safe
+500/503 responses. Disconnected/pre-application requests cannot be promised headers.
 
-Accept valid W3C trace context through the tracing SDK; ignore malformed context and do
-not propagate arbitrary baggage. Correlate request logs with trace/span IDs when present.
-No financial payload, idempotency key, authorization header or database URL becomes a
-trace attribute. Correlation headers are transport metadata, not part of the durable
-idempotency result.
+Use valid W3C trace context without arbitrary baggage. Correlation/request IDs are not
+idempotency keys, payment attributes, fingerprint fields, durable response-body data or
+metric labels. Every replay uses current-attempt diagnostic headers and original payment IDs.
+
+INFO arrival/completion logs cover every application HTTP route; DEBUG adds sanitized
+processing stages through storage. PAYMENTS_LOG_LEVEL controls threshold. Full redaction
+and bounded best-effort delivery apply at every level; no financial payload or raw errors.
+
+## Idempotency lifecycle and TTL
+
+Route-scoped middleware validates and normalizes the body/key through schemas before claim.
+Only valid POST /v1/bulk-payments requests create entries; health, unknown paths, wrong
+methods and invalid input cannot reserve keys. Replay validation precedes returning any
+cached body. Preserve fingerprint v1 and payer/key scope; no change to amount/UUID/description
+normalization or payment ordering. Prepared body is replayed safely downstream, not consumed
+or inconsistently parsed twice. Admission state is private server state, not trusted headers.
+
+On connection A, an atomic new claim commits processing before admission. Matching completed
+entries replay status/body; matching processing entries return 409 request_processing.
+Changed normalized content under an unexpired key returns 409 idempotency_key_conflict.
+Do not wait for connection B's financial transaction just to replay a concurrent request.
+A short simultaneous A claim can contend within existing bounds; database outage remains503.
+
+The controller uses a separate B transaction for monetary logic plus its validated immutable
+result receipt. A final A transaction publishes completed from that receipt. No A transaction
+is held across B. Return normal201/422 only after publication; failures return safe503 when
+possible. Even if publication fails, B may have committed. Recovery must publish the same
+receipt and IDs, never execute payments again based solely on a processing flag or timeout.
+A definitively abandoned no-effect generation can be released only after fenced recovery.
+
+Processing expiry: created_at+24h. Completed response expiry: first completed publication+24h.
+Use database time; replay does not extend retention. Resolved expired key reuse starts a
+new generation and can create a new payment. Active/unresolved entries cannot be discarded
+by TTL; duplicates can remain409 until bounded reconciliation establishes the result.
+Business422 is retained exactly like201; validation422, processing409 and transient503 are
+not cached completed results. No new polling endpoint or failed state is introduced.
+
+Existing completed keys receive a full24h window from migration cutover. Preserve fingerprint
+version and cached semantics; don't expire old keys immediately or reinterpret their contents.
+Corrupt/incomplete durable outcomes fail closed503 and never authorize payment execution.
+
+## Operational endpoints and maintenance
 
 | Endpoint | Contract |
 | --- | --- |
-| `GET /health/live` | 200 with `{"status":"alive"}` while the process serves requests; no database call or monetary effects. Database outage must not make liveness fail. |
-| `GET /health/ready` | 200 with `{"status":"ready"}` only after initialization/schema compatibility checks and a bounded read-only database/pool probe; otherwise 503 with `{"status":"not_ready"}`. Never expose connection/error details or reserve a key. |
-| `GET /metrics` | Prometheus exposition from process-local metrics/registry, without a database query; never a balance or payment-data export. |
+| GET /health/live | 200 {"status":"alive"}, no database work; database outage does not break liveness. |
+| GET /health/ready | 200 {"status":"ready"} after initialized supported schema and bounded read-only availability check; otherwise503 {"status":"not_ready"}. |
+| GET /metrics | Process-local finite-label Prometheus metrics without financial SQL or data. |
 
-Management routes are operational, not additional payment APIs. Restrict them to trusted
-monitoring access through deployment networking/ingress; Compose remains loopback-only.
-Scrape each single-worker service process separately and aggregate in the monitoring
-system. Multiple app objects in tests must have separate registries; multiple worker
-processes behind one unspecific scrape target are unsupported without an explicit
-aggregation configuration. Routine probes/scrapes do not produce payment completion logs
-or count as payment traffic.
+These routes are unversioned and nonmutating. They produce HTTP lifecycle logs but not
+payment-attempt metrics. Ingress restricts monitoring access; Compose binds loopback.
+Each app owns a separate registry/provider and each worker is scraped separately.
+POST /bulk-payments remains404; the only monetary endpoint is POST /v1/bulk-payments.
 
-## Replay and compatibility
+Explicit maintenance: python -m app.db.idempotency_maintenance --batch-size N --max-batches M
+--timeout-seconds T. Positive finite inputs required; bounded reconciliation/deletion uses
+execution guards and never executes payments. Safe aggregate diagnostics only, nonzero on
+failure. Deployment scheduling and connection-budget allocation are explicit; no infinite
+worker/retry loop is implied.
 
-The key namespace is `(canonical payer UUID, exact key string)`. Fingerprint v1 is SHA256
-of UTF-8 bytes consisting of `v1:` followed by deterministic JSON with sorted object keys,
-compact separators and literal Unicode (`ensure_ascii=False`). Its document has exactly
-`payer_firm_uuid` and `payments`; each payment has `amount`, `payee_firm_uuid`, `description`.
-Canonical amounts are dollar strings with exactly two fractional digits, derived with
-integer arithmetic. Payment array order and descriptions remain unchanged.
+## Configuration and migration interfaces
 
-The full success list, including every generated payment ID and its request-order position,
-is stored in the idempotency result in the same transaction as the payment rows. Replay
-returns those same IDs and values; it does not rebuild the list from mutable firm data.
-Replay preserves the original HTTP status and JSON value; transport headers and object
-serialization order are not byte-for-byte delivery guarantees. Normalized equivalent
-money/UUID spellings replay; a changed amount, recipient, description or entry order returns
-409. Business 422 results remain stable after later deposits or firm creation. Invalid
-requests do not consume keys. There is no automatic expiry.
+Settings derives from pydantic_settings.BaseSettings. Preserve DATABASE_URL and all existing
+PAYMENTS_* aliases, configured/local profiles and explicit budget validation. Normal source
+precedence is explicit configuration > process environment > literal project-root dotenv >
+permitted defaults. Explicit mapping/local factories disable ambient sources. No import-time
+loading or os.environ mutation; no settings/secret dump in errors. New PAYMENTS_LOG_LEVEL
+accepts DEBUG/INFO/WARNING/ERROR/CRITICAL case-insensitively, default INFO. Higher thresholds
+intentionally suppress INFO visibility. New PAYMENTS_IDEMPOTENCY_POOL_MAX defaults1 and partitions the existing combined POOL_MAX;
+two app-owned pools use distinct lifecycle/business sessions without doubling connection
+or waiter budgets. No new configurable TTL is introduced.
 
-Any future change to fingerprint format, response semantics or key retention requires an
-explicit compatibility/migration decision. Deployments must continue to interpret retained
-v1 records; do not reinterpret old keys under a new canonicalization algorithm.
+python -m app.db.migrate and alembic upgrade head use the shared safe configuration source
+policy, finite waits and advisory-serialized transactional Alembic environment. Package0002
+with the production image; exact supported head plus structure required at startup. Drain
+old app writers before upgrade. Preserve financial and replay state; refuse destructive
+state/receipt downgrade. Missing/incompatible head never triggers automatic request DDL.
 
-## Application interfaces and dependency direction
-
-Schemas in app/schemas/payments.py define Payment, BulkPayment, PaymentCreated and
-BulkPaymentResponse with existing bounds/validators. app/schemas/headers.py owns key value
-validation; controller extraction enforces exactly one header. Error schemas are separate.
-Plain model records have no HTTP status field:
-
-```python
-@dataclass(frozen=True)
-class TransferResult:
-    kind: Literal["accepted", "rejected"]
-    body: dict[str, Any]
-
-@dataclass(frozen=True)
-class Result:
-    kind: Literal["accepted", "rejected", "conflict"]
-    body: dict[str, Any]
-    outcome: Literal["committed", "replayed", "business_rejected", "conflict"]
-
-class BulkPaymentService:
-    @staticmethod
-    async def transfer(connection: AsyncConnection[DictRow],
-                       request: BulkPayment) -> TransferResult: ...
-
-# app/services/idempotency.py: operates inside its caller-owned transaction
-async def execute(connection: AsyncConnection[DictRow],
-                  request: BulkPayment, key: str) -> Result: ...
-
-# app/db/database.py: owns checkout, deadline and transaction completion
-async def run_transaction[T](pool: Pool,
-    work: Callable[[AsyncConnection[DictRow]], Awaitable[T]]) -> T: ...
-
-class Settings:
-    @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> Self: ...
-    @classmethod
-    def local(cls, database_url: str, **overrides: int) -> Self: ...
-
-def load_environment(env: Mapping[str, str] | None = None) -> dict[str, str]: ...
-def create_app(configuration: Settings | str | None = None) -> FastAPI: ...
-def create_pool(configuration: Settings | str) -> Pool: ...
-def migrate(database_url: str) -> None: ...
-```
-
-The controller awaits run_transaction(pool, callback), with callback invoking the separate
-idempotency service. Only after that await succeeds does it map accepted/rejected/conflict
-to201/422/409. Result.outcome is attempt telemetry, not persisted response data. The storage
-codec retains existing201/422 status values for durable compatibility. BulkPaymentService
-returns a transfer result; commit ownership and HTTP translation stay in their layers.
-
-Settings load during lifespan, not import. Explicit test settings/mappings bypass ambient
-configuration. Application startup must validate both schema and supported revision; an
-invalid configuration, missing head or unavailable prerequisite leaves no serving app.
-
-## Async lifetime and failure boundary
-
-One absolute asyncio.timeout_at operation deadline covers acquisition, checkout validation,
-reservation, transfer and commit. Expiry becomes503 with Retry-After:1 for a connected caller;
-COMMIT overlap remains uncertain. Before pool handoff the owner closes/discards its borrowed
-session before cancelling/joining the child. After synchronous ownership transfer to pool
-maintenance it must not close that session. No detached financial task continues; nonfinancial
-pool maintenance owns subsequent capacity recovery. External cancellation propagates after
-bounded cleanup rather than manufacturing an HTTP response.
-
-## Migration command contract
-
-`python -m app.db.migrate` reads DATABASE_URL through the shared dotenv/environment loader
-and invokes Alembic upgrade head. `alembic upgrade head` is the equivalent direct migration
-command, using alembic.ini and migrations/env.py. The application entry point is app.main:app.
-Successful upgrades exit0 with the head recorded; incompatible/partial legacy schemas,
-unsupported destructive downgrade or migration failure exit nonzero without falsely advancing
-the revision. Runtime errors are sanitized; credentials and raw SQL never reach CLI output.
-Migration execution uses bounded SQLAlchemy Core/psycopg connections and a single advisory-
-locked transaction. Configuration in alembic.ini contains resource locations, not credentials.
-
-Old POST /bulk-payments returns404 without reservation/effects; the sole payment route is
-POST /v1/bulk-payments. Health and metrics remain unversioned. Startup schema/revision failure
-is an initialization error, not a new payment-response shape or a payment migration endpoint.
-
-## Configuration
-
-Read repository-root .env as literal defaults with python-dotenv and overlay os.environ;
-explicit mappings bypass both. Do not mutate process environment or load at import time.
-Missing .env is valid if runtime environment supplies settings. .env.example contains local-
-only illustrative values; actual dotenv files are excluded from Git and images. Keep all
-configured-profile validation and existing operational limits; migration commands have their
-own finite bounds. New migration framework dependencies are locked without unrelated upgrades.
+Controller, checker, payment service and database ownership/signatures are in code-design.md.
+The existing async absolute deadline covers A/B/A and cleanup. COMMIT uncertainty remains503,
+external cancellation propagates after bounded owned-task cleanup, and the pool's synchronous
+ownership handoff remains authoritative. No hidden fresh deadline per phase.
